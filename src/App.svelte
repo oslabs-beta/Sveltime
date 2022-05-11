@@ -1,5 +1,7 @@
-<script>
-    export let name;
+<script lang='ts'>
+    export let name:string;
+   
   </script>
   
   <p>Hello {name}</p>
+  

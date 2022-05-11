@@ -312,10 +312,10 @@ var app = (function () {
     }
 
     const app = new App({
-      target: document.body,
-      props: {
-        name: 'Peter',
-      },
+        target: document.body,
+        props: {
+            name: 24,
+        },
     });
 
     return app;
