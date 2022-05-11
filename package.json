@@ -1,0 +1,32 @@
+{
+  "name": "sveltime",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "rollup -c -w",
+    "start": "sirv public",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wrreiff/Sveltime.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/wrreiff/Sveltime/issues"
+  },
+  "homepage": "https://github.com/wrreiff/Sveltime#readme",
+  "dependencies": {
+    "svelte": "^3.48.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^13.3.0",
+    "rollup": "^2.72.1",
+    "rollup-plugin-livereload": "^2.0.5",
+    "rollup-plugin-svelte": "^7.1.0",
+    "sirv-cli": "^2.0.2"
+  }
+}
