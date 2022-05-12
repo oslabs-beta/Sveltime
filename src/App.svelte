@@ -3,5 +3,5 @@
    
   </script>
   
-  <p>Hello {name}</p>
+  <p>Hello and Goodbye {name}</p>
   

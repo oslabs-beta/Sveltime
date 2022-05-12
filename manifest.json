@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+
+  "name": "Tool Test",
+  "version": "1.0",
+
+  "description": "Developer Tools for Svelte",
+  "author": "Team Sveltetime",
+
+  "devtools_page": "extension/html/devtools.html",
+
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": ["/extension/js/content.js"]
+    }
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  }
+}

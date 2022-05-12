@@ -275,7 +275,7 @@ var app = (function () {
     	return {
     		c() {
     			p = element("p");
-    			t0 = text("Hello ");
+    			t0 = text("Hello and Goodbye ");
     			t1 = text(/*name*/ ctx[0]);
     		},
     		m(target, anchor) {
@@ -314,7 +314,7 @@ var app = (function () {
     const app = new App({
         target: document.body,
         props: {
-            name: 24,
+            name: 'Peter',
         },
     });
 
