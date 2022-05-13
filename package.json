@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "moduleFileExtensions": [
+    "js",
+    "svelte"
+  ],
   "scripts": {
     "dev": "rollup -c -w",
     "start": "sirv public",
