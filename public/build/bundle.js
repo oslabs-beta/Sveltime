@@ -1,5 +1,5 @@
 
-(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35730/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
+(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
 var app = (function () {
     'use strict';
 
@@ -16163,10 +16163,16 @@ var app = (function () {
     		});
 
     		port.onMessage.addListener(msg => {
-    			if (msg.source) {
-    				console.log('source received from devtools: ', msg.source);
-    				const ast = parse$3(msg.source);
-    				console.log('ast after parse: ', ast);
+    			console.log('msg received: ', msg);
+
+    			if (msg.newArr) {
+    				msg.newArr.forEach(e => {
+    					if (e.source) {
+    						console.log('file URL: ', e.url);
+    						const ast = parse$3(e.source);
+    						console.log('ast: ', ast);
+    					}
+    				});
     			}
     		});
     	});

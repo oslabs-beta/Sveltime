@@ -1,22 +1,32 @@
-
 chrome.devtools.panels.create("tool-test", null, "/public/index.html", null);
 
-
 chrome.runtime.onConnect.addListener(port => {
-  console.assert(port.name === "svelte-devtools-connection");
-  port.onMessage.addListener(msg => {
+  console.assert(port.name === 'svelte-devtools-connection');
+  port.onMessage.addListener((msg) => {
+    let arrSvelteFiles;
     if (msg.name === 'start') {
       chrome.devtools.inspectedWindow.getResources((resources) => {
         console.log('resources: ', resources);
-        const arrSvelteFiles = resources.filter((file) => !!file.url.match(/.svelte$/));
+        arrSvelteFiles = resources.filter((file) => !!file.url.match(/.svelte$/));
         console.log('svelte files array: ', arrSvelteFiles);
-        arrSvelteFiles[0].getContent((source) => {
-          if (source) {
-            console.log('source: ', source);
-            port.postMessage({ source: source })
+        const newArr = [];
+        function recursiveCreateNewArr(arrSvelteFiles, index = 0) {
+          if (arrSvelteFiles[index] === undefined) {
+            port.postMessage({ newArr });
+            return;
           }
-        });
-      }); 
+          arrSvelteFiles[index].getContent((source) => {
+            newArr.push({
+              url: arrSvelteFiles[index].url,
+              type: arrSvelteFiles[index].type,
+              source,
+            });
+            recursiveCreateNewArr(arrSvelteFiles, index + 1);
+          });
+        }
+        recursiveCreateNewArr(arrSvelteFiles);
+        console.log('newArr: ', newArr);
+      });
     }
-  })
+  });
 });
