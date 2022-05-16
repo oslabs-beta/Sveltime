@@ -25,6 +25,7 @@
   },
   "homepage": "https://github.com/wrreiff/Sveltime#readme",
   "dependencies": {
+    "@types/chrome": "^0.0.185",
     "svelte": "^3.48.0"
   },
   "devDependencies": {
