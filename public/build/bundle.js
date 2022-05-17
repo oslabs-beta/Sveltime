@@ -3,7 +3,7 @@
 var app = (function () {
     'use strict';
 
-    function noop$1() { }
+    function noop$2() { }
     function run(fn) {
         return fn();
     }
@@ -31,11 +31,23 @@ var app = (function () {
     function detach(node) {
         node.parentNode.removeChild(node);
     }
+    function destroy_each(iterations, detaching) {
+        for (let i = 0; i < iterations.length; i += 1) {
+            if (iterations[i])
+                iterations[i].d(detaching);
+        }
+    }
     function element(name) {
         return document.createElement(name);
     }
     function text$1(data) {
         return document.createTextNode(data);
+    }
+    function space() {
+        return text$1(' ');
+    }
+    function empty$2() {
+        return text$1('');
     }
     function children(element) {
         return Array.from(element.childNodes);
@@ -194,7 +206,7 @@ var app = (function () {
             ctx: null,
             // state
             props,
-            update: noop$1,
+            update: noop$2,
             not_equal,
             bound: blank_object(),
             // lifecycle
@@ -253,7 +265,7 @@ var app = (function () {
     class SvelteComponent {
         $destroy() {
             destroy_component(this, 1);
-            this.$destroy = noop$1;
+            this.$destroy = noop$2;
         }
         $on(type, callback) {
             const callbacks = (this.$$.callbacks[type] || (this.$$.callbacks[type] = []));
@@ -273,12 +285,57 @@ var app = (function () {
         }
     }
 
-    (typeof process !== 'undefined' && process.hrtime)
+    const now = (typeof process !== 'undefined' && process.hrtime)
         ? () => {
             const t = process.hrtime();
             return t[0] * 1e3 + t[1] / 1e6;
         }
         : () => self.performance.now();
+    function collapse_timings(timings) {
+        const result = {};
+        timings.forEach(timing => {
+            result[timing.label] = Object.assign({
+                total: timing.end - timing.start
+            }, timing.children && collapse_timings(timing.children));
+        });
+        return result;
+    }
+    class Stats {
+        constructor() {
+            this.start_time = now();
+            this.stack = [];
+            this.current_children = this.timings = [];
+        }
+        start(label) {
+            const timing = {
+                label,
+                start: now(),
+                end: null,
+                children: []
+            };
+            this.current_children.push(timing);
+            this.stack.push(timing);
+            this.current_timing = timing;
+            this.current_children = timing.children;
+        }
+        stop(label) {
+            if (label !== this.current_timing.label) {
+                throw new Error(`Mismatched timing labels (expected ${this.current_timing.label}, got ${label})`);
+            }
+            this.current_timing.end = now();
+            this.stack.pop();
+            this.current_timing = this.stack[this.stack.length - 1];
+            this.current_children = this.current_timing ? this.current_timing.children : this.timings;
+        }
+        render() {
+            const timings = Object.assign({
+                total: now() - this.start_time
+            }, collapse_timings(this.timings));
+            return {
+                timings
+            };
+        }
+    }
 
     // Reserved word lists for various dialects of the language
 
@@ -5766,10 +5823,44 @@ var app = (function () {
       return Parser.parseExpressionAt(input, pos, options)
     }
 
+    function flatten(nodes, target = []) {
+        for (let i = 0; i < nodes.length; i += 1) {
+            const node = nodes[i];
+            if (Array.isArray(node)) {
+                flatten(node, target);
+            }
+            else {
+                target.push(node);
+            }
+        }
+        return target;
+    }
+
     const pattern = /^\s*svelte-ignore\s+([\s\S]+)\s*$/m;
     function extract_svelte_ignore(text) {
         const match = pattern.exec(text);
         return match ? match[1].split(/[^\S]/).map(x => x.trim()).filter(Boolean) : [];
+    }
+    function extract_svelte_ignore_from_comments(node) {
+        return flatten((node.leadingComments || []).map(comment => extract_svelte_ignore(comment.value)));
+    }
+    function extract_ignores_above_position(position, template_nodes) {
+        const previous_node_idx = template_nodes.findIndex(child => child.end === position);
+        if (previous_node_idx === -1) {
+            return [];
+        }
+        for (let i = previous_node_idx; i >= 0; i--) {
+            const node = template_nodes[i];
+            if (node.type !== 'Comment' && node.type !== 'Text') {
+                return [];
+            }
+            if (node.type === 'Comment') {
+                if (node.ignores.length) {
+                    return node.ignores;
+                }
+            }
+        }
+        return [];
     }
 
     function fuzzymatch(name, names) {
@@ -6481,10 +6572,1876 @@ var app = (function () {
     	}
     });
 
+    //@ts-check
+    /** @typedef { import('estree').Node} Node */
+    /** @typedef {Node | {
+     *   type: 'PropertyDefinition';
+     *   computed: boolean;
+     *   value: Node
+     * }} NodeWithPropertyDefinition */
+
+    /**
+     *
+     * @param {NodeWithPropertyDefinition} node
+     * @param {NodeWithPropertyDefinition} parent
+     * @returns boolean
+     */
+    function is_reference (node, parent) {
+    	if (node.type === 'MemberExpression') {
+    		return !node.computed && is_reference(node.object, node);
+    	}
+
+    	if (node.type === 'Identifier') {
+    		if (!parent) return true;
+
+    		switch (parent.type) {
+    			// disregard `bar` in `foo.bar`
+    			case 'MemberExpression': return parent.computed || node === parent.object;
+
+    			// disregard the `foo` in `class {foo(){}}` but keep it in `class {[foo](){}}`
+    			case 'MethodDefinition': return parent.computed;
+
+    			// disregard the `foo` in `class {foo=bar}` but keep it in `class {[foo]=bar}` and `class {bar=foo}`
+    			case 'PropertyDefinition': return parent.computed || node === parent.value;
+
+    			// disregard the `bar` in `{ bar: foo }`, but keep it in `{ [bar]: foo }`
+    			case 'Property': return parent.computed || node === parent.value;
+
+    			// disregard the `bar` in `export { foo as bar }` or
+    			// the foo in `import { foo as bar }`
+    			case 'ExportSpecifier':
+    			case 'ImportSpecifier': return node === parent.local;
+
+    			// disregard the `foo` in `foo: while (...) { ... break foo; ... continue foo;}`
+    			case 'LabeledStatement':
+    			case 'BreakStatement':
+    			case 'ContinueStatement': return false;
+    			default: return true;
+    		}
+    	}
+
+    	return false;
+    }
+
+    /** @param {import('estree').Node} expression */
+    function analyze(expression) {
+    	/** @typedef {import('estree').Node} Node */
+
+    	/** @type {WeakMap<Node, Scope>} */
+    	const map = new WeakMap();
+
+    	/** @type {Map<string, Node>} */
+    	const globals = new Map();
+
+    	const scope = new Scope$1(null, false);
+
+    	/** @type {[Scope, import('estree').Identifier][]} */
+    	const references = [];
+    	let current_scope = scope;
+
+    	walk(expression, {
+    		/**
+    		 * @param {Node} node
+    		 * @param {any} parent
+    		 */
+    		enter(node, parent) {
+    			switch (node.type) {
+    				case 'Identifier':
+    					if (is_reference(node, parent)) {
+    						references.push([current_scope, node]);
+    					}
+    					break;
+
+    				case 'ImportDeclaration':
+    					node.specifiers.forEach((specifier) => {
+    						current_scope.declarations.set(specifier.local.name, specifier);
+    					});
+    					break;
+
+    				case 'FunctionExpression':
+    				case 'FunctionDeclaration':
+    				case 'ArrowFunctionExpression':
+    					if (node.type === 'FunctionDeclaration') {
+    						if (node.id) {
+    							current_scope.declarations.set(node.id.name, node);
+    						}
+
+    						map.set(node, current_scope = new Scope$1(current_scope, false));
+    					} else {
+    						map.set(node, current_scope = new Scope$1(current_scope, false));
+
+    						if (node.type === 'FunctionExpression' && node.id) {
+    							current_scope.declarations.set(node.id.name, node);
+    						}
+    					}
+
+    					node.params.forEach(param => {
+    						extract_names(param).forEach(name => {
+    							current_scope.declarations.set(name, node);
+    						});
+    					});
+    					break;
+
+    				case 'ForStatement':
+    				case 'ForInStatement':
+    				case 'ForOfStatement':
+    					map.set(node, current_scope = new Scope$1(current_scope, true));
+    					break;
+
+    				case 'BlockStatement':
+    					map.set(node, current_scope = new Scope$1(current_scope, true));
+    					break;
+
+    				case 'ClassDeclaration':
+    				case 'VariableDeclaration':
+    					current_scope.add_declaration(node);
+    					break;
+
+    				case 'CatchClause':
+    					map.set(node, current_scope = new Scope$1(current_scope, true));
+
+    					if (node.param) {
+    						extract_names(node.param).forEach(name => {
+    							current_scope.declarations.set(name, node.param);
+    						});
+    					}
+    					break;
+    			}
+    		},
+
+    		/** @param {Node} node */
+    		leave(node) {
+    			if (map.has(node)) {
+    				current_scope = current_scope.parent;
+    			}
+    		}
+    	});
+
+    	for (let i = references.length - 1; i >= 0; --i) {
+    		const [scope, reference] = references[i];
+
+    		if (!scope.references.has(reference.name)) {
+    			add_reference(scope, reference.name);
+    		}
+    		if (!scope.find_owner(reference.name)) {
+    			globals.set(reference.name, reference);
+    		}
+    	}
+
+    	return { map, scope, globals };
+    }
+
+    /**
+     *
+     * @param {Scope} scope
+     * @param {string} name
+     */
+    function add_reference(scope, name) {
+    	scope.references.add(name);
+    	if (scope.parent) add_reference(scope.parent, name);
+    }
+
+    class Scope$1 {
+    	constructor(parent, block) {
+    		/** @type {Scope | null} */
+    		this.parent = parent;
+
+    		/** @type {boolean} */
+    		this.block = block;
+
+    		/** @type {Map<string, import('estree').Node>} */
+    		this.declarations = new Map();
+
+    		/** @type {Set<string>} */
+    		this.initialised_declarations = new Set();
+
+    		/** @type {Set<string>} */
+    		this.references = new Set();
+    	}
+
+    	/** @param {import('estree').VariableDeclaration | import('estree').ClassDeclaration} node */
+    	add_declaration(node) {
+    		if (node.type === 'VariableDeclaration') {
+    			if (node.kind === 'var' && this.block && this.parent) {
+    				this.parent.add_declaration(node);
+    			} else {
+    				/** @param {import('estree').VariableDeclarator} declarator */
+    				const handle_declarator = (declarator) => {
+    					extract_names(declarator.id).forEach(name => {
+    						this.declarations.set(name, node);
+    						if (declarator.init) this.initialised_declarations.add(name);
+    					});				};
+
+    				node.declarations.forEach(handle_declarator);
+    			}
+    		} else if (node.id) {
+    			this.declarations.set(node.id.name, node);
+    		}
+    	}
+
+    	/**
+    	 * @param {string} name
+    	 * @returns {Scope | null}
+    	 */
+    	find_owner(name) {
+    		if (this.declarations.has(name)) return this;
+    		return this.parent && this.parent.find_owner(name);
+    	}
+
+    	/**
+    	 * @param {string} name
+    	 * @returns {boolean}
+    	 */
+    	has(name) {
+    		return (
+    			this.declarations.has(name) || (!!this.parent && this.parent.has(name))
+    		);
+    	}
+    }
+
+    /**
+     * @param {import('estree').Node} param
+     * @returns {string[]}
+     */
+    function extract_names(param) {
+    	return extract_identifiers(param).map(node => node.name);
+    }
+
+    /**
+     * @param {import('estree').Node} param
+     * @param {import('estree').Identifier[]} nodes
+     * @returns {import('estree').Identifier[]}
+     */
+    function extract_identifiers(param, nodes = []) {
+    	switch (param.type) {
+    		case 'Identifier':
+    			nodes.push(param);
+    			break;
+
+    		case 'MemberExpression':
+    			let object = param;
+    			while (object.type === 'MemberExpression') {
+    				object = /** @type {any} */ (object.object);
+    			}
+    			nodes.push(/** @type {any} */ (object));
+    			break;
+
+    		case 'ObjectPattern':
+    			/** @param {import('estree').Property | import('estree').RestElement} prop */
+    			const handle_prop = (prop) => {
+    				if (prop.type === 'RestElement') {
+    					extract_identifiers(prop.argument, nodes);
+    				} else {
+    					extract_identifiers(prop.value, nodes);
+    				}
+    			};
+
+    			param.properties.forEach(handle_prop);
+    			break;
+
+    		case 'ArrayPattern':
+    			/** @param {import('estree').Node} element */
+    			const handle_element = (element) => {
+    				if (element) extract_identifiers(element, nodes);
+    			};
+
+    			param.elements.forEach(handle_element);
+    			break;
+
+    		case 'RestElement':
+    			extract_identifiers(param.argument, nodes);
+    			break;
+
+    		case 'AssignmentPattern':
+    			extract_identifiers(param.left, nodes);
+    			break;
+    	}
+
+    	return nodes;
+    }
+
+    /**
+     * Does `array.push` for all `items`. Needed because `array.push(...items)` throws
+     * "Maximum call stack size exceeded" when `items` is too big of an array.
+     *
+     * @param {any[]} array 
+     * @param {any[]} items 
+     */
+    function push_array(array, items) {
+    	for (let i = 0; i < items.length; i++) {
+    		array.push(items[i]);
+    	}
+    }
+
+    // heavily based on https://github.com/davidbonnet/astring
+
+    /** @typedef {import('estree').ArrowFunctionExpression} ArrowFunctionExpression */
+    /** @typedef {import('estree').BinaryExpression} BinaryExpression */
+    /** @typedef {import('estree').CallExpression} CallExpression */
+    /** @typedef {import('estree').Comment} Comment */
+    /** @typedef {import('estree').ExportSpecifier} ExportSpecifier */
+    /** @typedef {import('estree').Expression} Expression */
+    /** @typedef {import('estree').FunctionDeclaration} FunctionDeclaration */
+    /** @typedef {import('estree').ImportDeclaration} ImportDeclaration */
+    /** @typedef {import('estree').ImportSpecifier} ImportSpecifier */
+    /** @typedef {import('estree').Literal} Literal */
+    /** @typedef {import('estree').LogicalExpression} LogicalExpression */
+    /** @typedef {import('estree').NewExpression} NewExpression */
+    /** @typedef {import('estree').Node} Node */
+    /** @typedef {import('estree').ObjectExpression} ObjectExpression */
+    /** @typedef {import('estree').Pattern} Pattern */
+    /** @typedef {import('estree').SequenceExpression} SequenceExpression */
+    /** @typedef {import('estree').SimpleCallExpression} SimpleCallExpression */
+    /** @typedef {import('estree').SwitchStatement} SwitchStatement */
+    /** @typedef {import('estree').VariableDeclaration} VariableDeclaration */
+
+    /**
+     * @typedef {{
+     *   content: string;
+     *   loc?: {
+     *     start: { line: number; column: number; };
+     *     end: { line: number; column: number; };
+     *   };
+     *   has_newline: boolean;
+     * }} Chunk
+     */
+
+    /**
+     * @typedef {(node: any, state: State) => Chunk[]} Handler
+     */
+
+    /**
+     * @typedef {{
+     *   indent: string;
+     *   scope: any; // TODO import from periscopic
+     *   scope_map: WeakMap<Node, any>;
+     *   getName: (name: string) => string;
+     *   deconflicted: WeakMap<Node, Map<string, string>>;
+     *   comments: Comment[];
+     * }} State
+     */
+
+    /**
+     * @param {Node} node
+     * @param {State} state
+     * @returns {Chunk[]}
+     */
+    function handle(node, state) {
+    	const handler = handlers[node.type];
+
+    	if (!handler) {
+    		throw new Error(`Not implemented ${node.type}`);
+    	}
+
+    	const result = handler(node, state);
+
+    	if (node.leadingComments) {
+    		result.unshift(c(node.leadingComments.map(comment => comment.type === 'Block'
+    			? `/*${comment.value}*/${/** @type {any} */ (comment).has_trailing_newline ? `\n${state.indent}` : ` `}`
+    			: `//${comment.value}${/** @type {any} */ (comment).has_trailing_newline ? `\n${state.indent}` : ` `}`).join(``)));
+    	}
+
+    	if (node.trailingComments) {
+    		state.comments.push(node.trailingComments[0]); // there is only ever one
+    	}
+
+    	return result;
+    }
+
+    /**
+     * @param {string} content
+     * @param {Node} [node]
+     * @returns {Chunk}
+     */
+    function c(content, node) {
+    	return {
+    		content,
+    		loc: node && node.loc,
+    		has_newline: /\n/.test(content)
+    	};
+    }
+
+    const OPERATOR_PRECEDENCE = {
+    	'||': 2,
+    	'&&': 3,
+    	'??': 4,
+    	'|': 5,
+    	'^': 6,
+    	'&': 7,
+    	'==': 8,
+    	'!=': 8,
+    	'===': 8,
+    	'!==': 8,
+    	'<': 9,
+    	'>': 9,
+    	'<=': 9,
+    	'>=': 9,
+    	in: 9,
+    	instanceof: 9,
+    	'<<': 10,
+    	'>>': 10,
+    	'>>>': 10,
+    	'+': 11,
+    	'-': 11,
+    	'*': 12,
+    	'%': 12,
+    	'/': 12,
+    	'**': 13,
+    };
+
+    /** @type {Record<string, number>} */
+    const EXPRESSIONS_PRECEDENCE = {
+    	ArrayExpression: 20,
+    	TaggedTemplateExpression: 20,
+    	ThisExpression: 20,
+    	Identifier: 20,
+    	Literal: 18,
+    	TemplateLiteral: 20,
+    	Super: 20,
+    	SequenceExpression: 20,
+    	MemberExpression: 19,
+    	CallExpression: 19,
+    	NewExpression: 19,
+    	AwaitExpression: 17,
+    	ClassExpression: 17,
+    	FunctionExpression: 17,
+    	ObjectExpression: 17,
+    	UpdateExpression: 16,
+    	UnaryExpression: 15,
+    	BinaryExpression: 14,
+    	LogicalExpression: 13,
+    	ConditionalExpression: 4,
+    	ArrowFunctionExpression: 3,
+    	AssignmentExpression: 3,
+    	YieldExpression: 2,
+    	RestElement: 1
+    };
+
+    /**
+     *
+     * @param {Expression} node
+     * @param {BinaryExpression | LogicalExpression} parent
+     * @param {boolean} is_right
+     * @returns
+     */
+    function needs_parens(node, parent, is_right) {
+    	// special case where logical expressions and coalesce expressions cannot be mixed,
+    	// either of them need to be wrapped with parentheses
+    	if (
+    		node.type === 'LogicalExpression' &&
+    		parent.type === 'LogicalExpression' &&
+    		((parent.operator === '??' && node.operator !== '??') ||
+    			(parent.operator !== '??' && node.operator === '??'))
+    	) {
+    		return true;
+    	}
+
+    	const precedence = EXPRESSIONS_PRECEDENCE[node.type];
+    	const parent_precedence = EXPRESSIONS_PRECEDENCE[parent.type];
+
+    	if (precedence !== parent_precedence) {
+    		// Different node types
+    		return (
+    			(!is_right &&
+    				precedence === 15 &&
+    				parent_precedence === 14 &&
+    				parent.operator === '**') ||
+    			precedence < parent_precedence
+    		);
+    	}
+
+    	if (precedence !== 13 && precedence !== 14) {
+    		// Not a `LogicalExpression` or `BinaryExpression`
+    		return false;
+    	}
+
+    	if (/** @type {BinaryExpression} */ (node).operator === '**' && parent.operator === '**') {
+    		// Exponentiation operator has right-to-left associativity
+    		return !is_right;
+    	}
+
+    	if (is_right) {
+    		// Parenthesis are used if both operators have the same precedence
+    		return (
+    			OPERATOR_PRECEDENCE[/** @type {BinaryExpression} */ (node).operator] <=
+    			OPERATOR_PRECEDENCE[parent.operator]
+    		);
+    	}
+
+    	return (
+    		OPERATOR_PRECEDENCE[/** @type {BinaryExpression} */ (node).operator] <
+    		OPERATOR_PRECEDENCE[parent.operator]
+    	);
+    }
+
+    /** @param {Node} node */
+    function has_call_expression(node) {
+    	while (node) {
+    		if (node.type[0] === 'CallExpression') {
+    			return true;
+    		} else if (node.type === 'MemberExpression') {
+    			node = node.object;
+    		} else {
+    			return false;
+    		}
+    	}
+    }
+
+    /** @param {Chunk[]} chunks */
+    const has_newline = (chunks) => {
+    	for (let i = 0; i < chunks.length; i += 1) {
+    		if (chunks[i].has_newline) return true;
+    	}
+    	return false;
+    };
+
+    /** @param {Chunk[]} chunks */
+    const get_length = (chunks) => {
+    	let total = 0;
+    	for (let i = 0; i < chunks.length; i += 1) {
+    		total += chunks[i].content.length;
+    	}
+    	return total;
+    };
+
+    /**
+     * @param {number} a
+     * @param {number} b
+     */
+    const sum = (a, b) => a + b;
+
+    /**
+     * @param {Chunk[][]} nodes
+     * @param {Chunk} separator
+     * @returns {Chunk[]}
+     */
+    const join = (nodes, separator) => {
+    	if (nodes.length === 0) return [];
+
+    	const joined = [...nodes[0]];
+    	for (let i = 1; i < nodes.length; i += 1) {
+    		joined.push(separator);
+    		push_array(joined, nodes[i]);
+    	}
+    	return joined;
+    };
+
+    /**
+     * @param {(node: any, state: State) => Chunk[]} fn
+     */
+    const scoped = (fn) => {
+    	/**
+    	 * @param {any} node
+    	 * @param {State} state
+    	 */
+    	const scoped_fn = (node, state) => {
+    		return fn(node, {
+    			...state,
+    			scope: state.scope_map.get(node)
+    		});
+    	};
+
+    	return scoped_fn;
+    };
+
+    /**
+     * @param {string} name
+     * @param {Set<string>} names
+     */
+    const deconflict = (name, names) => {
+    	const original = name;
+    	let i = 1;
+
+    	while (names.has(name)) {
+    		name = `${original}$${i++}`;
+    	}
+
+    	return name;
+    };
+
+    /**
+     * @param {Node[]} nodes
+     * @param {State} state
+     */
+    const handle_body = (nodes, state) => {
+    	const chunks = [];
+
+    	const body = nodes.map(statement => {
+    		const chunks = handle(statement, {
+    			...state,
+    			indent: state.indent
+    		});
+
+    		let add_newline = false;
+
+    		while (state.comments.length) {
+    			const comment = state.comments.shift();
+    			const prefix = add_newline ? `\n${state.indent}` : ` `;
+
+    			chunks.push(c(comment.type === 'Block'
+    				? `${prefix}/*${comment.value}*/`
+    				: `${prefix}//${comment.value}`));
+
+    			add_newline = (comment.type === 'Line');
+    		}
+
+    		return chunks;
+    	});
+
+    	let needed_padding = false;
+
+    	for (let i = 0; i < body.length; i += 1) {
+    		const needs_padding = has_newline(body[i]);
+
+    		if (i > 0) {
+    			chunks.push(
+    				c(needs_padding || needed_padding ? `\n\n${state.indent}` : `\n${state.indent}`)
+    			);
+    		}
+
+    		push_array(chunks, body[i]);
+
+    		needed_padding = needs_padding;
+    	}
+
+    	return chunks;
+    };
+
+    /**
+     * @param {VariableDeclaration} node
+     * @param {State} state
+     */
+    const handle_var_declaration = (node, state) => {
+    	const chunks = [c(`${node.kind} `)];
+
+    	const declarators = node.declarations.map(d => handle(d, {
+    		...state,
+    		indent: state.indent + (node.declarations.length === 1 ? '' : '\t')
+    	}));
+
+    	const multiple_lines = (
+    		declarators.some(has_newline) ||
+    		(declarators.map(get_length).reduce(sum, 0) + (state.indent.length + declarators.length - 1) * 2) > 80
+    	);
+
+    	const separator = c(multiple_lines ? `,\n${state.indent}\t` : ', ');
+
+    	push_array(chunks, join(declarators, separator));
+
+    	return chunks;
+    };
+
+    /** @type {Record<string, Handler>} */
+    const handlers = {
+    	Program(node, state) {
+    		return handle_body(node.body, state);
+    	},
+
+    	BlockStatement: scoped((node, state) => {
+    		return [
+    			c(`{\n${state.indent}\t`),
+    			...handle_body(node.body, { ...state, indent: state.indent + '\t' }),
+    			c(`\n${state.indent}}`)
+    		];
+    	}),
+
+    	EmptyStatement(node, state) {
+    		return [c(';')];
+    	},
+
+    	ParenthesizedExpression(node, state) {
+    		return handle(node.expression, state);
+    	},
+
+    	ExpressionStatement(node, state) {
+    		if (
+    			node.expression.type === 'AssignmentExpression' &&
+    			node.expression.left.type === 'ObjectPattern'
+    		) {
+    			// is an AssignmentExpression to an ObjectPattern
+    			return [
+    				c('('),
+    				...handle(node.expression, state),
+    				c(');')
+    			];
+    		}
+
+    		return [
+    			...handle(node.expression, state),
+    			c(';')
+    		];
+    	},
+
+    	IfStatement(node, state) {
+    		const chunks = [
+    			c('if ('),
+    			...handle(node.test, state),
+    			c(') '),
+    			...handle(node.consequent, state)
+    		];
+
+    		if (node.alternate) {
+    			chunks.push(c(' else '));
+    			push_array(chunks, handle(node.alternate, state));
+    		}
+
+    		return chunks;
+    	},
+
+    	LabeledStatement(node, state) {
+    		return [
+    			...handle(node.label, state),
+    			c(': '),
+    			...handle(node.body, state)
+    		];
+    	},
+
+    	BreakStatement(node, state) {
+    		return node.label
+    			? [c('break '), ...handle(node.label, state), c(';')]
+    			: [c('break;')];
+    	},
+
+    	ContinueStatement(node, state) {
+    		return node.label
+    			? [c('continue '), ...handle(node.label, state), c(';')]
+    			: [c('continue;')];
+    	},
+
+    	WithStatement(node, state) {
+    		return [
+    			c('with ('),
+    			...handle(node.object, state),
+    			c(') '),
+    			...handle(node.body, state)
+    		];
+    	},
+
+    	SwitchStatement(/** @type {SwitchStatement} */ node, state) {
+    		const chunks = [
+    			c('switch ('),
+    			...handle(node.discriminant, state),
+    			c(') {')
+    		];
+
+    		node.cases.forEach(block => {
+    			if (block.test) {
+    				chunks.push(c(`\n${state.indent}\tcase `));
+    				push_array(chunks, handle(block.test, { ...state, indent: `${state.indent}\t` }));
+    				chunks.push(c(':'));
+    			} else {
+    				chunks.push(c(`\n${state.indent}\tdefault:`));
+    			}
+
+    			block.consequent.forEach(statement => {
+    				chunks.push(c(`\n${state.indent}\t\t`));
+    				push_array(chunks, handle(statement, { ...state, indent: `${state.indent}\t\t` }));
+    			});
+    		});
+
+    		chunks.push(c(`\n${state.indent}}`));
+
+    		return chunks;
+    	},
+
+    	ReturnStatement(node, state) {
+    		if (node.argument) {
+    			const contains_comment = node.argument.leadingComments && node.argument.leadingComments.some((/** @type import('../utils/comments.js').CommentWithLocation */ comment) => comment.has_trailing_newline);
+    			return [
+    				c(contains_comment ? 'return (' : 'return '),
+    				...handle(node.argument, state),
+    				c(contains_comment ? ');' : ';')
+    			];
+    		} else {
+    			return [c('return;')];
+    		}
+    	},
+
+    	ThrowStatement(node, state) {
+    		return [
+    			c('throw '),
+    			...handle(node.argument, state),
+    			c(';')
+    		];
+    	},
+
+    	TryStatement(node, state) {
+    		const chunks = [
+    			c('try '),
+    			...handle(node.block, state)
+    		];
+
+    		if (node.handler) {
+    			if (node.handler.param) {
+    				chunks.push(c(' catch('));
+    				push_array(chunks, handle(node.handler.param, state));
+    				chunks.push(c(') '));
+    			} else {
+    				chunks.push(c(' catch '));
+    			}
+
+    			push_array(chunks, handle(node.handler.body, state));
+    		}
+
+    		if (node.finalizer) {
+    			chunks.push(c(' finally '));
+    			push_array(chunks, handle(node.finalizer, state));
+    		}
+
+    		return chunks;
+    	},
+
+    	WhileStatement(node, state) {
+    		return [
+    			c('while ('),
+    			...handle(node.test, state),
+    			c(') '),
+    			...handle(node.body, state)
+    		];
+    	},
+
+    	DoWhileStatement(node, state) {
+    		return [
+    			c('do '),
+    			...handle(node.body, state),
+    			c(' while ('),
+    			...handle(node.test, state),
+    			c(');')
+    		];
+    	},
+
+    	ForStatement: scoped((node, state) => {
+    		const chunks = [c('for (')];
+
+    		if (node.init) {
+    			if (node.init.type === 'VariableDeclaration') {
+    				push_array(chunks, handle_var_declaration(node.init, state));
+    			} else {
+    				push_array(chunks, handle(node.init, state));
+    			}
+    		}
+
+    		chunks.push(c('; '));
+    		if (node.test) push_array(chunks, handle(node.test, state));
+    		chunks.push(c('; '));
+    		if (node.update) push_array(chunks, handle(node.update, state));
+
+    		chunks.push(c(') '));
+    		push_array(chunks, handle(node.body, state));
+
+    		return chunks;
+    	}),
+
+    	ForInStatement: scoped((node, state) => {
+    		const chunks = [
+    			c(`for ${node.await ? 'await ' : ''}(`)
+    		];
+
+    		if (node.left.type === 'VariableDeclaration') {
+    			push_array(chunks, handle_var_declaration(node.left, state));
+    		} else {
+    			push_array(chunks, handle(node.left, state));
+    		}
+
+    		chunks.push(c(node.type === 'ForInStatement' ? ` in ` : ` of `));
+    		push_array(chunks, handle(node.right, state));
+    		chunks.push(c(') '));
+    		push_array(chunks, handle(node.body, state));
+
+    		return chunks;
+    	}),
+
+    	DebuggerStatement(node, state) {
+    		return [c('debugger', node), c(';')];
+    	},
+
+    	FunctionDeclaration: scoped((/** @type {FunctionDeclaration} */ node, state) => {
+    		const chunks = [];
+
+    		if (node.async) chunks.push(c('async '));
+    		chunks.push(c(node.generator ? 'function* ' : 'function '));
+    		if (node.id) push_array(chunks, handle(node.id, state));
+    		chunks.push(c('('));
+
+    		const params = node.params.map(p => handle(p, {
+    			...state,
+    			indent: state.indent + '\t'
+    		}));
+
+    		const multiple_lines = (
+    			params.some(has_newline) ||
+    			(params.map(get_length).reduce(sum, 0) + (state.indent.length + params.length - 1) * 2) > 80
+    		);
+
+    		const separator = c(multiple_lines ? `,\n${state.indent}` : ', ');
+
+    		if (multiple_lines) {
+    			chunks.push(c(`\n${state.indent}\t`));
+    			push_array(chunks, join(params, separator));
+    			chunks.push(c(`\n${state.indent}`));
+    		} else {
+    			push_array(chunks, join(params, separator));
+    		}
+
+    		chunks.push(c(') '));
+    		push_array(chunks, handle(node.body, state));
+
+    		return chunks;
+    	}),
+
+    	VariableDeclaration(node, state) {
+    		return handle_var_declaration(node, state).concat(c(';'));
+    	},
+
+    	VariableDeclarator(node, state) {
+    		if (node.init) {
+    			return [
+    				...handle(node.id, state),
+    				c(' = '),
+    				...handle(node.init, state)
+    			];
+    		} else {
+    			return handle(node.id, state);
+    		}
+    	},
+
+    	ClassDeclaration(node, state) {
+    		const chunks = [c('class ')];
+
+    		if (node.id) {
+    			push_array(chunks, handle(node.id, state));
+    			chunks.push(c(' '));
+    		}
+
+    		if (node.superClass) {
+    			chunks.push(c('extends '));
+    			push_array(chunks, handle(node.superClass, state));
+    			chunks.push(c(' '));
+    		}
+
+    		push_array(chunks, handle(node.body, state));
+
+    		return chunks;
+    	},
+
+    	ImportDeclaration(/** @type {ImportDeclaration} */ node, state) {
+    		const chunks = [c('import ')];
+
+    		const { length } = node.specifiers;
+    		const source = handle(node.source, state);
+
+    		if (length > 0) {
+    			let i = 0;
+
+    			while (i < length) {
+    				if (i > 0) {
+    					chunks.push(c(', '));
+    				}
+
+    				const specifier = node.specifiers[i];
+
+    				if (specifier.type === 'ImportDefaultSpecifier') {
+    					chunks.push(c(specifier.local.name, specifier));
+    					i += 1;
+    				} else if (specifier.type === 'ImportNamespaceSpecifier') {
+    					chunks.push(c('* as ' + specifier.local.name, specifier));
+    					i += 1;
+    				} else {
+    					break;
+    				}
+    			}
+
+    			if (i < length) {
+    				// we have named specifiers
+    				const specifiers = node.specifiers.slice(i).map((/** @type {ImportSpecifier} */ specifier) => {
+    					const name = handle(specifier.imported, state)[0];
+    					const as = handle(specifier.local, state)[0];
+
+    					if (name.content === as.content) {
+    						return [as];
+    					}
+
+    					return [name, c(' as '), as];
+    				});
+
+    				const width = get_length(chunks) + specifiers.map(get_length).reduce(sum, 0) + (2 * specifiers.length) + 6 + get_length(source);
+
+    				if (width > 80) {
+    					chunks.push(c(`{\n\t`));
+    					push_array(chunks, join(specifiers, c(',\n\t')));
+    					chunks.push(c('\n}'));
+    				} else {
+    					chunks.push(c(`{ `));
+    					push_array(chunks, join(specifiers, c(', ')));
+    					chunks.push(c(' }'));
+    				}
+    			}
+
+    			chunks.push(c(' from '));
+    		}
+
+    		push_array(chunks, source);
+    		chunks.push(c(';'));
+
+    		return chunks;
+    	},
+
+    	ImportExpression(node, state) {
+    		return [c('import('), ...handle(node.source, state), c(')')];
+    	},
+
+    	ExportDefaultDeclaration(node, state) {
+    		const chunks = [
+    			c(`export default `),
+    			...handle(node.declaration, state)
+    		];
+
+    		if (node.declaration.type !== 'FunctionDeclaration') {
+    			chunks.push(c(';'));
+    		}
+
+    		return chunks;
+    	},
+
+    	ExportNamedDeclaration(node, state) {
+    		const chunks = [c('export ')];
+
+    		if (node.declaration) {
+    			push_array(chunks, handle(node.declaration, state));
+    		} else {
+    			const specifiers = node.specifiers.map((/** @type {ExportSpecifier} */ specifier) => {
+    				const name = handle(specifier.local, state)[0];
+    				const as = handle(specifier.exported, state)[0];
+
+    				if (name.content === as.content) {
+    					return [name];
+    				}
+
+    				return [name, c(' as '), as];
+    			});
+
+    			const width = 7 + specifiers.map(get_length).reduce(sum, 0) + 2 * specifiers.length;
+
+    			if (width > 80) {
+    				chunks.push(c('{\n\t'));
+    				push_array(chunks, join(specifiers, c(',\n\t')));
+    				chunks.push(c('\n}'));
+    			} else {
+    				chunks.push(c('{ '));
+    				push_array(chunks, join(specifiers, c(', ')));
+    				chunks.push(c(' }'));
+    			}
+
+    			if (node.source) {
+    				chunks.push(c(' from '));
+    				push_array(chunks, handle(node.source, state));
+    			}
+    		}
+
+    		chunks.push(c(';'));
+
+    		return chunks;
+    	},
+
+    	ExportAllDeclaration(node, state) {
+    		return [
+    			c(`export * from `),
+    			...handle(node.source, state),
+    			c(`;`)
+    		];
+    	},
+
+    	MethodDefinition(node, state) {
+    		const chunks = [];
+
+    		if (node.static) {
+    			chunks.push(c('static '));
+    		}
+
+    		if (node.kind === 'get' || node.kind === 'set') {
+    			// Getter or setter
+    			chunks.push(c(node.kind + ' '));
+    		}
+
+    		if (node.value.async) {
+    			chunks.push(c('async '));
+    		}
+
+    		if (node.value.generator) {
+    			chunks.push(c('*'));
+    		}
+
+    		if (node.computed) {
+    			chunks.push(c('['));
+    			push_array(chunks, handle(node.key, state));
+    			chunks.push(c(']'));
+    		} else {
+    			push_array(chunks, handle(node.key, state));
+    		}
+
+    		chunks.push(c('('));
+
+    		const { params } = node.value;
+    		for (let i = 0; i < params.length; i += 1) {
+    			push_array(chunks, handle(params[i], state));
+    			if (i < params.length - 1) chunks.push(c(', '));
+    		}
+
+    		chunks.push(c(') '));
+    		push_array(chunks, handle(node.value.body, state));
+
+    		return chunks;
+    	},
+
+    	ArrowFunctionExpression: scoped((/** @type {ArrowFunctionExpression} */ node, state) => {
+    		const chunks = [];
+
+    		if (node.async) chunks.push(c('async '));
+
+    		if (node.params.length === 1 && node.params[0].type === 'Identifier') {
+    			push_array(chunks, handle(node.params[0], state));
+    		} else {
+    			const params = node.params.map(param => handle(param, {
+    				...state,
+    				indent: state.indent + '\t'
+    			}));
+
+    			chunks.push(c('('));
+    			push_array(chunks, join(params, c(', ')));
+    			chunks.push(c(')'));
+    		}
+
+    		chunks.push(c(' => '));
+
+    		if (
+    			node.body.type === 'ObjectExpression' ||
+    			(node.body.type === 'AssignmentExpression' && node.body.left.type === 'ObjectPattern')
+    		) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.body, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.body, state));
+    		}
+
+    		return chunks;
+    	}),
+
+    	ThisExpression(node, state) {
+    		return [c('this', node)];
+    	},
+
+    	Super(node, state) {
+    		return [c('super', node)];
+    	},
+
+    	RestElement(node, state) {
+    		return [c('...'), ...handle(node.argument, state)];
+    	},
+
+    	YieldExpression(node, state) {
+    		if (node.argument) {
+    			return [c(node.delegate ? `yield* ` : `yield `), ...handle(node.argument, state)];
+    		}
+
+    		return [c(node.delegate ? `yield*` : `yield`)];
+    	},
+
+    	AwaitExpression(node, state) {
+    		if (node.argument) {
+    			const precedence = EXPRESSIONS_PRECEDENCE[node.argument.type];
+
+    			if (precedence && (precedence < EXPRESSIONS_PRECEDENCE.AwaitExpression)) {
+    				return [c('await ('), ...handle(node.argument, state), c(')')];
+    			} else {
+    				return [c('await '), ...handle(node.argument, state)];
+    			}
+    		}
+
+    		return [c('await')];
+    	},
+
+    	TemplateLiteral(node, state) {
+    		const chunks = [c('`')];
+
+    		const { quasis, expressions } = node;
+
+    		for (let i = 0; i < expressions.length; i++) {
+    			chunks.push(
+    				c(quasis[i].value.raw),
+    				c('${')
+    			);
+    			push_array(chunks, handle(expressions[i], state));
+    			chunks.push(c('}'));
+    		}
+
+    		chunks.push(
+    			c(quasis[quasis.length - 1].value.raw),
+    			c('`')
+    		);
+
+    		return chunks;
+    	},
+
+    	TaggedTemplateExpression(node, state) {
+    		return handle(node.tag, state).concat(handle(node.quasi, state));
+    	},
+
+    	ArrayExpression(node, state) {
+    		const chunks = [c('[')];
+
+    		/** @type {Chunk[][]} */
+    		const elements = [];
+
+    		/** @type {Chunk[]} */
+    		let sparse_commas = [];
+
+    		for (let i = 0; i < node.elements.length; i += 1) {
+    			// can't use map/forEach because of sparse arrays
+    			const element = node.elements[i];
+    			if (element) {
+    				elements.push([...sparse_commas, ...handle(element, {
+    					...state,
+    					indent: state.indent + '\t'
+    				})]);
+    				sparse_commas = [];
+    			} else {
+    				sparse_commas.push(c(','));
+    			}
+    		}
+
+    		const multiple_lines = (
+    			elements.some(has_newline) ||
+    			(elements.map(get_length).reduce(sum, 0) + (state.indent.length + elements.length - 1) * 2) > 80
+    		);
+
+    		if (multiple_lines) {
+    			chunks.push(c(`\n${state.indent}\t`));
+    			push_array(chunks, join(elements, c(`,\n${state.indent}\t`)));
+    			chunks.push(c(`\n${state.indent}`));
+    			push_array(chunks, sparse_commas);
+    		} else {
+    			push_array(chunks, join(elements, c(', ')));
+    			push_array(chunks, sparse_commas);
+    		}
+
+    		chunks.push(c(']'));
+
+    		return chunks;
+    	},
+
+    	ObjectExpression(/** @type {ObjectExpression} */ node, state) {
+    		if (node.properties.length === 0) {
+    			return [c('{}')];
+    		}
+
+    		let has_inline_comment = false;
+
+    		/** @type {Chunk[]} */
+    		const chunks = [];
+    		const separator = c(', ');
+
+    		node.properties.forEach((p, i) => {
+    			push_array(chunks, handle(p, {
+    				...state,
+    				indent: state.indent + '\t'
+    			}));
+
+    			if (state.comments.length) {
+    				// TODO generalise this, so it works with ArrayExpressions and other things.
+    				// At present, stuff will just get appended to the closest statement/declaration
+    				chunks.push(c(', '));
+
+    				while (state.comments.length) {
+    					const comment = state.comments.shift();
+
+    					chunks.push(c(comment.type === 'Block'
+    						? `/*${comment.value}*/\n${state.indent}\t`
+    						: `//${comment.value}\n${state.indent}\t`));
+
+    					if (comment.type === 'Line') {
+    						has_inline_comment = true;
+    					}
+    				}
+    			} else {
+    				if (i < node.properties.length - 1) {
+    					chunks.push(separator);
+    				}
+    			}
+    		});
+
+    		const multiple_lines = (
+    			has_inline_comment ||
+    			has_newline(chunks) ||
+    			get_length(chunks) > 40
+    		);
+
+    		if (multiple_lines) {
+    			separator.content = `,\n${state.indent}\t`;
+    		}
+
+    		return [
+    			c(multiple_lines ? `{\n${state.indent}\t` : `{ `),
+    			...chunks,
+    			c(multiple_lines ? `\n${state.indent}}` : ` }`)
+    		];
+    	},
+
+    	Property(node, state) {
+    		const value = handle(node.value, state);
+
+    		if (node.key === node.value) {
+    			return value;
+    		}
+
+    		// special case
+    		if (
+    			!node.computed &&
+    			node.value.type === 'AssignmentPattern' &&
+    			node.value.left.type === 'Identifier' &&
+    			node.value.left.name === node.key.name
+    		) {
+    			return value;
+    		}
+
+    		if (!node.computed && node.value.type === 'Identifier' && (
+    			(node.key.type === 'Identifier' && node.key.name === value[0].content) ||
+    			(node.key.type === 'Literal' && node.key.value === value[0].content)
+    		)) {
+    			return value;
+    		}
+
+    		const key = handle(node.key, state);
+
+    		if (node.value.type === 'FunctionExpression' && !node.value.id) {
+    			state = {
+    				...state,
+    				scope: state.scope_map.get(node.value)
+    			};
+
+    			const chunks = node.kind !== 'init'
+    				? [c(`${node.kind} `)]
+    				: [];
+
+    			if (node.value.async) {
+    				chunks.push(c('async '));
+    			}
+    			if (node.value.generator) {
+    				chunks.push(c('*'));
+    			}
+
+    			push_array(chunks, node.computed ? [c('['), ...key, c(']')] : key);
+    			chunks.push(c('('));
+    			push_array(chunks, join(node.value.params.map((/** @type {Pattern} */ param) => handle(param, state)), c(', ')));
+    			chunks.push(c(') '));
+    			push_array(chunks, handle(node.value.body, state));
+
+    			return chunks;
+    		}
+
+    		if (node.computed) {
+    			return [
+    				c('['),
+    				...key,
+    				c(']: '),
+    				...value
+    			];
+    		}
+
+    		return [
+    			...key,
+    			c(': '),
+    			...value
+    		];
+    	},
+
+    	ObjectPattern(node, state) {
+    		const chunks = [c('{ ')];
+
+    		for (let i = 0; i < node.properties.length; i += 1) {
+    			push_array(chunks, handle(node.properties[i], state));
+    			if (i < node.properties.length - 1) chunks.push(c(', '));
+    		}
+
+    		chunks.push(c(' }'));
+
+    		return chunks;
+    	},
+
+    	SequenceExpression(/** @type {SequenceExpression} */ node, state) {
+    		const expressions = node.expressions.map(e => handle(e, state));
+
+    		return [
+    			c('('),
+    			...join(expressions, c(', ')),
+    			c(')')
+    		];
+    	},
+
+    	UnaryExpression(node, state) {
+    		const chunks = [c(node.operator)];
+
+    		if (node.operator.length > 1) {
+    			chunks.push(c(' '));
+    		}
+
+    		if (
+    			EXPRESSIONS_PRECEDENCE[node.argument.type] <
+    			EXPRESSIONS_PRECEDENCE.UnaryExpression
+    		) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.argument, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.argument, state));
+    		}
+
+    		return chunks;
+    	},
+
+    	UpdateExpression(node, state) {
+    		return node.prefix
+    			? [c(node.operator), ...handle(node.argument, state)]
+    			: [...handle(node.argument, state), c(node.operator)];
+    	},
+
+    	AssignmentExpression(node, state) {
+    		return [
+    			...handle(node.left, state),
+    			c(` ${node.operator || '='} `),
+    			...handle(node.right, state)
+    		];
+    	},
+
+    	BinaryExpression(node, state) {
+    		/**
+    		 * @type any[]
+    		 */
+    		const chunks = [];
+
+    		// TODO
+    		// const is_in = node.operator === 'in';
+    		// if (is_in) {
+    		// 	// Avoids confusion in `for` loops initializers
+    		// 	chunks.push(c('('));
+    		// }
+
+    		if (needs_parens(node.left, node, false)) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.left, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.left, state));
+    		}
+
+    		chunks.push(c(` ${node.operator} `));
+
+    		if (needs_parens(node.right, node, true)) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.right, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.right, state));
+    		}
+
+    		return chunks;
+    	},
+
+    	ConditionalExpression(node, state) {
+    		/**
+    		 * @type any[]
+    		 */
+    		const chunks = [];
+
+    		if (
+    			EXPRESSIONS_PRECEDENCE[node.test.type] >
+    			EXPRESSIONS_PRECEDENCE.ConditionalExpression
+    		) {
+    			push_array(chunks, handle(node.test, state));
+    		} else {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.test, state));
+    			chunks.push(c(')'));
+    		}
+
+    		const child_state = { ...state, indent: state.indent + '\t' };
+
+    		const consequent = handle(node.consequent, child_state);
+    		const alternate = handle(node.alternate, child_state);
+
+    		const multiple_lines = (
+    			has_newline(consequent) || has_newline(alternate) ||
+    			get_length(chunks) + get_length(consequent) + get_length(alternate) > 50
+    		);
+
+    		if (multiple_lines) {
+    			chunks.push(c(`\n${state.indent}? `));
+    			push_array(chunks, consequent);
+    			chunks.push(c(`\n${state.indent}: `));
+    			push_array(chunks, alternate);
+    		} else {
+    			chunks.push(c(` ? `));
+    			push_array(chunks, consequent);
+    			chunks.push(c(` : `));
+    			push_array(chunks, alternate);
+    		}
+
+    		return chunks;
+    	},
+
+    	NewExpression(/** @type {NewExpression} */ node, state) {
+    		const chunks = [c('new ')];
+
+    		if (
+    			EXPRESSIONS_PRECEDENCE[node.callee.type] <
+    			EXPRESSIONS_PRECEDENCE.CallExpression || has_call_expression(node.callee)
+    		) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.callee, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.callee, state));
+    		}
+
+    		// TODO this is copied from CallExpression — DRY it out
+    		const args = node.arguments.map(arg => handle(arg, {
+    			...state,
+    			indent: state.indent + '\t'
+    		}));
+
+    		const separator = args.some(has_newline) // TODO or length exceeds 80
+    			? c(',\n' + state.indent)
+    			: c(', ');
+
+    		chunks.push(c('('));
+    		push_array(chunks, join(args, separator));
+    		chunks.push(c(')'));
+
+    		return chunks;
+    	},
+
+    	ChainExpression(node, state) {
+    		return handle(node.expression, state);
+    	},
+
+    	CallExpression(/** @type {CallExpression} */ node, state) {
+    		/**
+    		 * @type any[]
+    		 */
+    		const chunks = [];
+
+    		if (
+    			EXPRESSIONS_PRECEDENCE[node.callee.type] <
+    			EXPRESSIONS_PRECEDENCE.CallExpression
+    		) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.callee, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.callee, state));
+    		}
+
+    		if (/** @type {SimpleCallExpression} */ (node).optional) {
+    			chunks.push(c('?.'));
+    		}
+
+    		const args = node.arguments.map(arg => handle(arg, state));
+
+    		const multiple_lines = args.slice(0, -1).some(has_newline); // TODO or length exceeds 80
+
+    		if (multiple_lines) {
+    			// need to handle args again. TODO find alternative approach?
+    			const args = node.arguments.map(arg => handle(arg, {
+    				...state,
+    				indent: `${state.indent}\t`
+    			}));
+
+    			chunks.push(c(`(\n${state.indent}\t`));
+    			push_array(chunks, join(args, c(`,\n${state.indent}\t`)));
+    			chunks.push(c(`\n${state.indent})`));
+    		} else {
+    			chunks.push(c('('));
+    			push_array(chunks, join(args, c(', ')));
+    			chunks.push(c(')'));
+    		}
+
+    		return chunks;
+    	},
+
+    	MemberExpression(node, state) {
+    		/**
+    		 * @type any[]
+    		 */
+    		const chunks = [];
+
+    		if (EXPRESSIONS_PRECEDENCE[node.object.type] < EXPRESSIONS_PRECEDENCE.MemberExpression) {
+    			chunks.push(c('('));
+    			push_array(chunks, handle(node.object, state));
+    			chunks.push(c(')'));
+    		} else {
+    			push_array(chunks, handle(node.object, state));
+    		}
+
+    		if (node.computed) {
+    			if (node.optional) {
+    				chunks.push(c('?.'));
+    			}
+    			chunks.push(c('['));
+    			push_array(chunks, handle(node.property, state));
+    			chunks.push(c(']'));
+    		} else {
+    			chunks.push(c(node.optional ? '?.' : '.'));
+    			push_array(chunks, handle(node.property, state));
+    		}
+
+    		return chunks;
+    	},
+
+    	MetaProperty(node, state) {
+    		return [...handle(node.meta, state), c('.'), ...handle(node.property, state)];
+    	},
+
+    	Identifier(node, state) {
+    		let name = node.name;
+
+    		if (name[0] === '@') {
+    			name = state.getName(name.slice(1));
+    		} else if (node.name[0] === '#') {
+    			const owner = state.scope.find_owner(node.name);
+
+    			if (!owner) {
+    				throw new Error(`Could not find owner for node`);
+    			}
+
+    			if (!state.deconflicted.has(owner)) {
+    				state.deconflicted.set(owner, new Map());
+    			}
+
+    			const deconflict_map = state.deconflicted.get(owner);
+
+    			if (!deconflict_map.has(node.name)) {
+    				deconflict_map.set(node.name, deconflict(node.name.slice(1), owner.references));
+    			}
+
+    			name = deconflict_map.get(node.name);
+    		}
+
+    		return [c(name, node)];
+    	},
+
+    	Literal(/** @type {Literal} */ node, state) {
+    		if (typeof node.value === 'string') {
+    			return [
+    				// TODO do we need to handle weird unicode characters somehow?
+    				// str.replace(/\\u(\d{4})/g, (m, n) => String.fromCharCode(+n))
+    				c((node.raw || JSON.stringify(node.value)).replace(re, (_m, _i, at, hash, name) => {
+    					if (at)	return '@' + name;
+    					if (hash) return '#' + name;
+    					throw new Error(`this shouldn't happen`);
+    				}), node)
+    			];
+    		}
+
+    		return [c(node.raw || String(node.value), node)];
+    	}
+    };
+
+    handlers.ForOfStatement = handlers.ForInStatement;
+    handlers.FunctionExpression = handlers.FunctionDeclaration;
+    handlers.ClassExpression = handlers.ClassDeclaration;
+    handlers.ClassBody = handlers.BlockStatement;
+    handlers.SpreadElement = handlers.RestElement;
+    handlers.ArrayPattern = handlers.ArrayExpression;
+    handlers.LogicalExpression = handlers.BinaryExpression;
+    handlers.AssignmentPattern = handlers.AssignmentExpression;
+
     var charToInteger = {};
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
     for (var i = 0; i < chars.length; i++) {
         charToInteger[chars.charCodeAt(i)] = i;
+    }
+    function encode(decoded) {
+        var sourceFileIndex = 0; // second field
+        var sourceCodeLine = 0; // third field
+        var sourceCodeColumn = 0; // fourth field
+        var nameIndex = 0; // fifth field
+        var mappings = '';
+        for (var i = 0; i < decoded.length; i++) {
+            var line = decoded[i];
+            if (i > 0)
+                mappings += ';';
+            if (line.length === 0)
+                continue;
+            var generatedCodeColumn = 0; // first field
+            var lineMappings = [];
+            for (var _i = 0, line_1 = line; _i < line_1.length; _i++) {
+                var segment = line_1[_i];
+                var segmentMappings = encodeInteger(segment[0] - generatedCodeColumn);
+                generatedCodeColumn = segment[0];
+                if (segment.length > 1) {
+                    segmentMappings +=
+                        encodeInteger(segment[1] - sourceFileIndex) +
+                            encodeInteger(segment[2] - sourceCodeLine) +
+                            encodeInteger(segment[3] - sourceCodeColumn);
+                    sourceFileIndex = segment[1];
+                    sourceCodeLine = segment[2];
+                    sourceCodeColumn = segment[3];
+                }
+                if (segment.length === 5) {
+                    segmentMappings += encodeInteger(segment[4] - nameIndex);
+                    nameIndex = segment[4];
+                }
+                lineMappings.push(segmentMappings);
+            }
+            mappings += lineMappings.join(',');
+        }
+        return mappings;
+    }
+    function encodeInteger(num) {
+        var result = '';
+        num = num < 0 ? (-num << 1) | 1 : num << 1;
+        do {
+            var clamped = num & 31;
+            num >>>= 5;
+            if (num > 0) {
+                clamped |= 32;
+            }
+            result += chars[clamped];
+        } while (num > 0);
+        return result;
+    }
+
+    /** @type {(str?: string) => string} str */
+    let btoa$1 = () => {
+    	throw new Error('Unsupported environment: `window.btoa` or `Buffer` should be supported.');
+    };
+
+    if (typeof window !== 'undefined' && typeof window.btoa === 'function') {
+    	btoa$1 = (str) => window.btoa(unescape(encodeURIComponent(str)));
+    } else if (typeof Buffer === 'function') {
+    	btoa$1 = (str) => Buffer.from(str, 'utf-8').toString('base64');
+    }
+
+    /** @typedef {import('estree').Node} Node */
+
+    /**
+     * @typedef {{
+     *   file?: string;
+     *   sourceMapSource?: string;
+     *   sourceMapContent?: string;
+     *   sourceMapEncodeMappings?: boolean; // default true
+     *   getName?: (name: string) => string;
+     * }} PrintOptions
+     */
+
+    /**
+     * @param {Node} node
+     * @param {PrintOptions} opts
+     * @returns {{ code: string, map: any }} // TODO
+     */
+    function print(node, opts = {}) {
+    	if (Array.isArray(node)) {
+    		return print({
+    			type: 'Program',
+    			body: node,
+    			sourceType: 'module'
+    		}, opts);
+    	}
+
+    	const {
+    		getName = /** @param {string} x */ (x) => {
+    			throw new Error(`Unhandled sigil @${x}`);
+    		}
+    	} = opts;
+
+    	let { map: scope_map, scope } = analyze(node);
+    	const deconflicted = new WeakMap();
+
+    	const chunks = handle(node, {
+    		indent: '',
+    		getName,
+    		scope,
+    		scope_map,
+    		deconflicted,
+    		comments: []
+    	});
+
+    	/** @typedef {[number, number, number, number]} Segment */
+
+    	let code = '';
+    	let current_column = 0;
+
+    	/** @type {Segment[][]} */
+    	let mappings = [];
+
+    	/** @type {Segment[]} */
+    	let current_line = [];
+
+    	for (let i = 0; i < chunks.length; i += 1) {
+    		const chunk = chunks[i];
+
+    		code += chunk.content;
+
+    		if (chunk.loc) {
+    			current_line.push([
+    				current_column,
+    				0, // source index is always zero
+    				chunk.loc.start.line - 1,
+    				chunk.loc.start.column,
+    			]);
+    		}
+
+    		for (let i = 0; i < chunk.content.length; i += 1) {
+    			if (chunk.content[i] === '\n') {
+    				mappings.push(current_line);
+    				current_line = [];
+    				current_column = 0;
+    			} else {
+    				current_column += 1;
+    			}
+    		}
+
+    		if (chunk.loc) {
+    			current_line.push([
+    				current_column,
+    				0, // source index is always zero
+    				chunk.loc.end.line - 1,
+    				chunk.loc.end.column,
+    			]);
+    		}
+    	}
+
+    	mappings.push(current_line);
+
+    	const map = {
+    		version: 3,
+    		/** @type {string[]} */
+    		names: [],
+    		sources: [opts.sourceMapSource || null],
+    		sourcesContent: [opts.sourceMapContent || null],
+    		mappings: opts.sourceMapEncodeMappings == undefined || opts.sourceMapEncodeMappings
+    			? encode(mappings) : mappings
+    	};
+
+    	Object.defineProperties(map, {
+    		toString: {
+    			enumerable: false,
+    			value: function toString() {
+    				return JSON.stringify(this);
+    			}
+    		},
+    		toUrl: {
+    			enumerable: false,
+    			value: function toUrl() {
+    				return 'data:application/json;charset=utf-8;base64,' + btoa$1(this.toString());
+    			}
+    		}
+    	});
+
+    	return {
+    		code,
+    		map
+    	};
     }
 
     /** @typedef {import('estree').Expression} Expression */
@@ -6746,6 +8703,31 @@ var app = (function () {
      *
      * @param {TemplateStringsArray} strings
      * @param  {any[]} values
+     * @returns {Node[]}
+     */
+    function b(strings, ...values) {
+    	const str = join$1(strings);
+
+    	/** @type {CommentWithLocation[]} */
+    	const comments = [];
+
+    	try {
+    		let ast = /** @type {any} */ (
+    			parse(str, acorn_opts(comments, str))
+    		);
+
+    		ast = inject(str, ast, values, comments);
+
+    		return ast.body;
+    	} catch (err) {
+    		handle_error(str, err);
+    	}
+    }
+
+    /**
+     *
+     * @param {TemplateStringsArray} strings
+     * @param  {any[]} values
      * @returns {Expression & { start: Number, end: number }}
      */
     function x(strings, ...values) {
@@ -6769,6 +8751,31 @@ var app = (function () {
     		);
 
     		return expression;
+    	} catch (err) {
+    		handle_error(str, err);
+    	}
+    }
+
+    /**
+     *
+     * @param {TemplateStringsArray} strings
+     * @param  {any[]} values
+     * @returns {(Property | SpreadElement) & { start: Number, end: number }}
+     */
+    function p(strings, ...values) {
+    	const str = `{${join$1(strings)}}`;
+
+    	/** @type {CommentWithLocation[]} */
+    	const comments = [];
+
+    	try {
+    		let expression = /** @type {any} */ (
+    			parseExpressionAt(str, 0, acorn_opts(comments, str))
+    		);
+
+    		expression = inject(str, expression, values, comments);
+
+    		return expression.properties[0];
     	} catch (err) {
     		handle_error(str, err);
     	}
@@ -6837,6 +8844,8 @@ var app = (function () {
     const whitespace = /[ \t\r\n]/;
     const start_whitespace = /^[ \t\r\n]*/;
     const end_whitespace = /[ \t\r\n]*$/;
+    const start_newline = /^\r?\n/;
+    const dimensions = /^(?:offset|client)(?:Width|Height)$/;
 
     function read_expression(parser) {
         try {
@@ -15723,6 +17732,71 @@ var app = (function () {
         }
         return text;
     }
+
+    const globals = new Set([
+        'alert',
+        'Array',
+        'BigInt',
+        'Boolean',
+        'clearInterval',
+        'clearTimeout',
+        'confirm',
+        'console',
+        'Date',
+        'decodeURI',
+        'decodeURIComponent',
+        'document',
+        'Element',
+        'encodeURI',
+        'encodeURIComponent',
+        'Error',
+        'EvalError',
+        'Event',
+        'EventSource',
+        'fetch',
+        'FormData',
+        'global',
+        'globalThis',
+        'history',
+        'HTMLElement',
+        'Infinity',
+        'InternalError',
+        'Intl',
+        'isFinite',
+        'isNaN',
+        'JSON',
+        'localStorage',
+        'location',
+        'Map',
+        'Math',
+        'NaN',
+        'navigator',
+        'Node',
+        'Number',
+        'Object',
+        'parseFloat',
+        'parseInt',
+        'process',
+        'Promise',
+        'prompt',
+        'RangeError',
+        'ReferenceError',
+        'RegExp',
+        'sessionStorage',
+        'Set',
+        'setInterval',
+        'setTimeout',
+        'String',
+        'SVGElement',
+        'Symbol',
+        'SyntaxError',
+        'TypeError',
+        'undefined',
+        'URIError',
+        'URL',
+        'URLSearchParams',
+        'window'
+    ]);
     const reserved = new Set([
         'arguments',
         'await',
@@ -15773,6 +17847,23 @@ var app = (function () {
         'with',
         'yield'
     ]);
+    function is_valid(str) {
+        let i = 0;
+        while (i < str.length) {
+            const code = full_char_code_at(str, i);
+            if (!(i === 0 ? isIdentifierStart : isIdentifierChar)(code, true))
+                return false;
+            i += code <= 0xffff ? 1 : 2;
+        }
+        return true;
+    }
+    function sanitize(name) {
+        return name
+            .replace(/[^a-zA-Z0-9_]+/g, '_')
+            .replace(/^_/, '')
+            .replace(/_$/, '')
+            .replace(/^[0-9]/, '_$&');
+    }
 
     function getLocator(source, options) {
         if (options === void 0) { options = {}; }
@@ -16032,14 +18123,4722 @@ var app = (function () {
         };
     }
 
-    x `true`;
-    x `false`;
+    function is_head(node) {
+        return node && node.type === 'MemberExpression' && node.object.name === '@_document' && node.property.name === 'head';
+    }
+
+    class Block$1 {
+        constructor(options) {
+            this.dependencies = new Set();
+            this.binding_group_initialised = new Set();
+            this.event_listeners = [];
+            this.variables = new Map();
+            this.has_update_method = false;
+            this.parent = options.parent;
+            this.renderer = options.renderer;
+            this.name = options.name;
+            this.type = options.type;
+            this.comment = options.comment;
+            this.wrappers = [];
+            // for keyed each blocks
+            this.key = options.key;
+            this.first = null;
+            this.bindings = options.bindings;
+            this.chunks = {
+                declarations: [],
+                init: [],
+                create: [],
+                claim: [],
+                hydrate: [],
+                mount: [],
+                measure: [],
+                restore_measurements: [],
+                fix: [],
+                animate: [],
+                intro: [],
+                update: [],
+                outro: [],
+                destroy: []
+            };
+            this.has_animation = false;
+            this.has_intro_method = false; // a block could have an intro method but not intro transitions, e.g. if a sibling block has intros
+            this.has_outro_method = false;
+            this.outros = 0;
+            this.get_unique_name = this.renderer.component.get_unique_name_maker();
+            this.aliases = new Map();
+            if (this.key)
+                this.aliases.set('key', this.get_unique_name('key'));
+        }
+        assign_variable_names() {
+            const seen = new Set();
+            const dupes = new Set();
+            let i = this.wrappers.length;
+            while (i--) {
+                const wrapper = this.wrappers[i];
+                if (!wrapper.var)
+                    continue;
+                if (seen.has(wrapper.var.name)) {
+                    dupes.add(wrapper.var.name);
+                }
+                seen.add(wrapper.var.name);
+            }
+            const counts = new Map();
+            i = this.wrappers.length;
+            while (i--) {
+                const wrapper = this.wrappers[i];
+                if (!wrapper.var)
+                    continue;
+                let suffix = '';
+                if (dupes.has(wrapper.var.name)) {
+                    const i = counts.get(wrapper.var.name) || 0;
+                    counts.set(wrapper.var.name, i + 1);
+                    suffix = i;
+                }
+                wrapper.var.name = this.get_unique_name(wrapper.var.name + suffix).name;
+            }
+        }
+        add_dependencies(dependencies) {
+            dependencies.forEach(dependency => {
+                this.dependencies.add(dependency);
+            });
+            this.has_update_method = true;
+            if (this.parent) {
+                this.parent.add_dependencies(dependencies);
+            }
+        }
+        add_element(id, render_statement, claim_statement, parent_node, no_detach) {
+            this.add_variable(id);
+            this.chunks.create.push(b `${id} = ${render_statement};`);
+            if (this.renderer.options.hydratable) {
+                this.chunks.claim.push(b `${id} = ${claim_statement || render_statement};`);
+            }
+            if (parent_node) {
+                this.chunks.mount.push(b `@append(${parent_node}, ${id});`);
+                if (is_head(parent_node) && !no_detach)
+                    this.chunks.destroy.push(b `@detach(${id});`);
+            }
+            else {
+                this.chunks.mount.push(b `@insert(#target, ${id}, #anchor);`);
+                if (!no_detach)
+                    this.chunks.destroy.push(b `if (detaching) @detach(${id});`);
+            }
+        }
+        add_intro(local) {
+            this.has_intros = this.has_intro_method = true;
+            if (!local && this.parent)
+                this.parent.add_intro();
+        }
+        add_outro(local) {
+            this.has_outros = this.has_outro_method = true;
+            this.outros += 1;
+            if (!local && this.parent)
+                this.parent.add_outro();
+        }
+        add_animation() {
+            this.has_animation = true;
+        }
+        add_variable(id, init) {
+            if (this.variables.has(id.name)) {
+                throw new Error(`Variable '${id.name}' already initialised with a different value`);
+            }
+            this.variables.set(id.name, { id, init });
+        }
+        alias(name) {
+            if (!this.aliases.has(name)) {
+                this.aliases.set(name, this.get_unique_name(name));
+            }
+            return this.aliases.get(name);
+        }
+        child(options) {
+            return new Block$1(Object.assign({}, this, { key: null }, options, { parent: this }));
+        }
+        get_contents(key) {
+            const { dev } = this.renderer.options;
+            if (this.has_outros) {
+                this.add_variable({ type: 'Identifier', name: '#current' });
+                if (this.chunks.intro.length > 0) {
+                    this.chunks.intro.push(b `#current = true;`);
+                    this.chunks.mount.push(b `#current = true;`);
+                }
+                if (this.chunks.outro.length > 0) {
+                    this.chunks.outro.push(b `#current = false;`);
+                }
+            }
+            if (this.autofocus) {
+                if (this.autofocus.condition_expression) {
+                    this.chunks.mount.push(b `if (${this.autofocus.condition_expression}) ${this.autofocus.element_var}.focus();`);
+                }
+                else {
+                    this.chunks.mount.push(b `${this.autofocus.element_var}.focus();`);
+                }
+            }
+            this.render_listeners();
+            const properties = {};
+            const noop = x `@noop`;
+            properties.key = key;
+            if (this.first) {
+                properties.first = x `null`;
+                this.chunks.hydrate.push(b `this.first = ${this.first};`);
+            }
+            if (this.chunks.create.length === 0 && this.chunks.hydrate.length === 0) {
+                properties.create = noop;
+            }
+            else {
+                const hydrate = this.chunks.hydrate.length > 0 && (this.renderer.options.hydratable
+                    ? b `this.h();`
+                    : this.chunks.hydrate);
+                properties.create = x `function #create() {
+				${this.chunks.create}
+				${hydrate}
+			}`;
+            }
+            if (this.renderer.options.hydratable || this.chunks.claim.length > 0) {
+                if (this.chunks.claim.length === 0 && this.chunks.hydrate.length === 0) {
+                    properties.claim = noop;
+                }
+                else {
+                    properties.claim = x `function #claim(#nodes) {
+					${this.chunks.claim}
+					${this.renderer.options.hydratable && this.chunks.hydrate.length > 0 && b `this.h();`}
+				}`;
+                }
+            }
+            if (this.renderer.options.hydratable && this.chunks.hydrate.length > 0) {
+                properties.hydrate = x `function #hydrate() {
+				${this.chunks.hydrate}
+			}`;
+            }
+            if (this.chunks.mount.length === 0) {
+                properties.mount = noop;
+            }
+            else if (this.event_listeners.length === 0) {
+                properties.mount = x `function #mount(#target, #anchor) {
+				${this.chunks.mount}
+			}`;
+            }
+            else {
+                properties.mount = x `function #mount(#target, #anchor) {
+				${this.chunks.mount}
+			}`;
+            }
+            if (this.has_update_method || this.maintain_context) {
+                if (this.chunks.update.length === 0 && !this.maintain_context) {
+                    properties.update = noop;
+                }
+                else {
+                    const ctx = this.maintain_context ? x `#new_ctx` : x `#ctx`;
+                    let dirty = { type: 'Identifier', name: '#dirty' };
+                    if (!this.renderer.context_overflow && !this.parent) {
+                        dirty = { type: 'ArrayPattern', elements: [dirty] };
+                    }
+                    properties.update = x `function #update(${ctx}, ${dirty}) {
+					${this.maintain_context && b `#ctx = ${ctx};`}
+					${this.chunks.update}
+				}`;
+                }
+            }
+            if (this.has_animation) {
+                properties.measure = x `function #measure() {
+				${this.chunks.measure}
+			}`;
+                if (this.chunks.restore_measurements.length) {
+                    properties.restore_measurements = x `function #restore_measurements(#measurement) {
+					${this.chunks.restore_measurements}
+				}`;
+                }
+                properties.fix = x `function #fix() {
+				${this.chunks.fix}
+			}`;
+                properties.animate = x `function #animate() {
+				${this.chunks.animate}
+			}`;
+            }
+            if (this.has_intro_method || this.has_outro_method) {
+                if (this.chunks.intro.length === 0) {
+                    properties.intro = noop;
+                }
+                else {
+                    properties.intro = x `function #intro(#local) {
+					${this.has_outros && b `if (#current) return;`}
+					${this.chunks.intro}
+				}`;
+                }
+                if (this.chunks.outro.length === 0) {
+                    properties.outro = noop;
+                }
+                else {
+                    properties.outro = x `function #outro(#local) {
+					${this.chunks.outro}
+				}`;
+                }
+            }
+            if (this.chunks.destroy.length === 0) {
+                properties.destroy = noop;
+            }
+            else {
+                properties.destroy = x `function #destroy(detaching) {
+				${this.chunks.destroy}
+			}`;
+            }
+            if (!this.renderer.component.compile_options.dev) {
+                // allow shorthand names
+                for (const name in properties) {
+                    const property = properties[name];
+                    if (property)
+                        property.id = null;
+                }
+            }
+            const return_value = x `{
+			key: ${properties.key},
+			first: ${properties.first},
+			c: ${properties.create},
+			l: ${properties.claim},
+			h: ${properties.hydrate},
+			m: ${properties.mount},
+			p: ${properties.update},
+			r: ${properties.measure},
+			s: ${properties.restore_measurements},
+			f: ${properties.fix},
+			a: ${properties.animate},
+			i: ${properties.intro},
+			o: ${properties.outro},
+			d: ${properties.destroy}
+		}`;
+            const block = dev && this.get_unique_name('block');
+            const body = b `
+			${this.chunks.declarations}
+
+			${Array.from(this.variables.values()).map(({ id, init }) => {
+            return init
+                ? b `let ${id} = ${init}`
+                : b `let ${id}`;
+        })}
+
+			${this.chunks.init}
+
+			${dev
+            ? b `
+					const ${block} = ${return_value};
+					@dispatch_dev("SvelteRegisterBlock", {
+						block: ${block},
+						id: ${this.name || 'create_fragment'}.name,
+						type: "${this.type}",
+						source: "${this.comment ? this.comment.replace(/"/g, '\\"') : ''}",
+						ctx: #ctx
+					});
+					return ${block};`
+            : b `
+					return ${return_value};`}
+		`;
+            return body;
+        }
+        has_content() {
+            return !!this.first ||
+                this.event_listeners.length > 0 ||
+                this.chunks.intro.length > 0 ||
+                this.chunks.outro.length > 0 ||
+                this.chunks.create.length > 0 ||
+                this.chunks.hydrate.length > 0 ||
+                this.chunks.claim.length > 0 ||
+                this.chunks.mount.length > 0 ||
+                this.chunks.update.length > 0 ||
+                this.chunks.destroy.length > 0 ||
+                this.has_animation;
+        }
+        render() {
+            const key = this.key && this.get_unique_name('key');
+            const args = [x `#ctx`];
+            if (key)
+                args.unshift(key);
+            const fn = b `function ${this.name}(${args}) {
+			${this.get_contents(key)}
+		}`;
+            return this.comment
+                ? b `
+				// ${this.comment}
+				${fn}`
+                : fn;
+        }
+        render_listeners(chunk = '') {
+            if (this.event_listeners.length > 0) {
+                this.add_variable({ type: 'Identifier', name: '#mounted' });
+                this.chunks.destroy.push(b `#mounted = false`);
+                const dispose = {
+                    type: 'Identifier',
+                    name: `#dispose${chunk}`
+                };
+                this.add_variable(dispose);
+                if (this.event_listeners.length === 1) {
+                    this.chunks.mount.push(b `
+						if (!#mounted) {
+							${dispose} = ${this.event_listeners[0]};
+							#mounted = true;
+						}
+					`);
+                    this.chunks.destroy.push(b `${dispose}();`);
+                }
+                else {
+                    this.chunks.mount.push(b `
+					if (!#mounted) {
+						${dispose} = [
+							${this.event_listeners}
+						];
+						#mounted = true;
+					}
+				`);
+                    this.chunks.destroy.push(b `@run_all(${dispose});`);
+                }
+            }
+        }
+    }
+
+    class Wrapper {
+        constructor(renderer, block, parent, node) {
+            this.node = node;
+            // make these non-enumerable so that they can be logged sensibly
+            // (TODO in dev only?)
+            Object.defineProperties(this, {
+                renderer: {
+                    value: renderer
+                },
+                parent: {
+                    value: parent
+                }
+            });
+            this.can_use_innerhtml = !renderer.options.hydratable;
+            this.is_static_content = !renderer.options.hydratable;
+            block.wrappers.push(this);
+        }
+        cannot_use_innerhtml() {
+            this.can_use_innerhtml = false;
+            if (this.parent)
+                this.parent.cannot_use_innerhtml();
+        }
+        not_static_content() {
+            this.is_static_content = false;
+            if (this.parent)
+                this.parent.not_static_content();
+        }
+        get_or_create_anchor(block, parent_node, parent_nodes) {
+            // TODO use this in EachBlock and IfBlock — tricky because
+            // children need to be created first
+            const needs_anchor = this.next ? !this.next.is_dom_node() : !parent_node || !this.parent.is_dom_node();
+            const anchor = needs_anchor
+                ? block.get_unique_name(`${this.var.name}_anchor`)
+                : (this.next && this.next.var) || { type: 'Identifier', name: 'null' };
+            if (needs_anchor) {
+                block.add_element(anchor, x `@empty()`, parent_nodes && x `@empty()`, parent_node);
+            }
+            return anchor;
+        }
+        get_update_mount_node(anchor) {
+            return ((this.parent && this.parent.is_dom_node())
+                ? this.parent.var
+                : x `${anchor}.parentNode`);
+        }
+        is_dom_node() {
+            return (this.node.type === 'Element' ||
+                this.node.type === 'Text' ||
+                this.node.type === 'MustacheTag');
+        }
+        render(_block, _parent_node, _parent_nodes) {
+            throw Error('Wrapper class is not renderable');
+        }
+    }
+
+    function create_debugging_comment(node, component) {
+        const { locate, source } = component;
+        let c = node.start;
+        if (node.type === 'ElseBlock') {
+            while (source[c - 1] !== '{')
+                c -= 1;
+            while (source[c - 1] === '{')
+                c -= 1;
+        }
+        let d;
+        if (node.type === 'InlineComponent' || node.type === 'Element' || node.type === 'SlotTemplate') {
+            if (node.children.length) {
+                d = node.children[0].start;
+                while (source[d - 1] !== '>')
+                    d -= 1;
+            }
+            else {
+                d = node.start;
+                while (source[d] !== '>')
+                    d += 1;
+                d += 1;
+            }
+        }
+        else if (node.type === 'Text' || node.type === 'Comment') {
+            d = node.end;
+        }
+        else {
+            // @ts-ignore
+            d = node.expression ? node.expression.node.end : c;
+            while (source[d] !== '}' && d <= source.length)
+                d += 1;
+            while (source[d] === '}')
+                d += 1;
+        }
+        const start = locate(c);
+        const loc = `(${start.line}:${start.column})`;
+        return `${loc} ${source.slice(c, d)}`.replace(/\s/g, ' ');
+    }
+
+    class Node$1 {
+        constructor(component, parent, _scope, info) {
+            this.start = info.start;
+            this.end = info.end;
+            this.type = info.type;
+            // this makes properties non-enumerable, which makes logging
+            // bearable. might have a performance cost. TODO remove in prod?
+            Object.defineProperties(this, {
+                component: {
+                    value: component
+                },
+                parent: {
+                    value: parent
+                }
+            });
+        }
+        cannot_use_innerhtml() {
+            if (this.can_use_innerhtml !== false) {
+                this.can_use_innerhtml = false;
+                if (this.parent)
+                    this.parent.cannot_use_innerhtml();
+            }
+        }
+        find_nearest(selector) {
+            if (selector.test(this.type))
+                return this;
+            if (this.parent)
+                return this.parent.find_nearest(selector);
+        }
+        get_static_attribute_value(name) {
+            const attribute = this.attributes && this.attributes.find((attr) => attr.type === 'Attribute' && attr.name.toLowerCase() === name);
+            if (!attribute)
+                return null;
+            if (attribute.is_true)
+                return true;
+            if (attribute.chunks.length === 0)
+                return '';
+            if (attribute.chunks.length === 1 && attribute.chunks[0].type === 'Text') {
+                return attribute.chunks[0].data;
+            }
+            return null;
+        }
+        has_ancestor(type) {
+            return this.parent ?
+                this.parent.type === type || this.parent.has_ancestor(type) :
+                false;
+        }
+    }
+
+    // All compiler warnings should be listed and accessed from here
+    /**
+     * @internal
+     */
+    var compiler_warnings = {
+        custom_element_no_tag: {
+            code: 'custom-element-no-tag',
+            message: 'No custom element \'tag\' option was specified. To automatically register a custom element, specify a name with a hyphen in it, e.g. <svelte:options tag="my-thing"/>. To hide this warning, use <svelte:options tag={null}/>'
+        },
+        unused_export_let: (component, property) => ({
+            code: 'unused-export-let',
+            message: `${component} has unused export property '${property}'. If it is for external reference only, please consider using \`export const ${property}\``
+        }),
+        module_script_reactive_declaration: {
+            code: 'module-script-reactive-declaration',
+            message: '$: has no effect in a module script'
+        },
+        non_top_level_reactive_declaration: {
+            code: 'non-top-level-reactive-declaration',
+            message: '$: has no effect outside of the top-level'
+        },
+        module_script_variable_reactive_declaration: (names) => ({
+            code: 'module-script-reactive-declaration',
+            message: `${names.map(name => `"${name}"`).join(', ')} ${names.length > 1 ? 'are' : 'is'} declared in a module script and will not be reactive`
+        }),
+        missing_declaration: (name, has_script) => ({
+            code: 'missing-declaration',
+            message: `'${name}' is not defined` + (has_script ? '' : `. Consider adding a <script> block with 'export let ${name}' to declare a prop`)
+        }),
+        missing_custom_element_compile_options: {
+            code: 'missing-custom-element-compile-options',
+            message: "The 'tag' option is used when generating a custom element. Did you forget the 'customElement: true' compile option?"
+        },
+        css_unused_selector: (selector) => ({
+            code: 'css-unused-selector',
+            message: `Unused CSS selector "${selector}"`
+        }),
+        empty_block: {
+            code: 'empty-block',
+            message: 'Empty block'
+        },
+        reactive_component: (name) => ({
+            code: 'reactive-component',
+            message: `<${name}/> will not be reactive if ${name} changes. Use <svelte:component this={${name}}/> if you want this reactivity.`
+        }),
+        component_name_lowercase: (name) => ({
+            code: 'component-name-lowercase',
+            message: `<${name}> will be treated as an HTML element unless it begins with a capital letter`
+        }),
+        avoid_is: {
+            code: 'avoid-is',
+            message: 'The \'is\' attribute is not supported cross-browser and should be avoided'
+        },
+        invalid_html_attribute: (name, suggestion) => ({
+            code: 'invalid-html-attribute',
+            message: `'${name}' is not a valid HTML attribute. Did you mean '${suggestion}'?`
+        }),
+        a11y_aria_attributes: (name) => ({
+            code: 'a11y-aria-attributes',
+            message: `A11y: <${name}> should not have aria-* attributes`
+        }),
+        a11y_unknown_aria_attribute: (attribute, suggestion) => ({
+            code: 'a11y-unknown-aria-attribute',
+            message: `A11y: Unknown aria attribute 'aria-${attribute}'` + (suggestion ? ` (did you mean '${suggestion}'?)` : '')
+        }),
+        a11y_hidden: (name) => ({
+            code: 'a11y-hidden',
+            message: `A11y: <${name}> element should not be hidden`
+        }),
+        a11y_misplaced_role: (name) => ({
+            code: 'a11y-misplaced-role',
+            message: `A11y: <${name}> should not have role attribute`
+        }),
+        a11y_unknown_role: (role, suggestion) => ({
+            code: 'a11y-unknown-role',
+            message: `A11y: Unknown role '${role}'` + (suggestion ? ` (did you mean '${suggestion}'?)` : '')
+        }),
+        a11y_no_redundant_roles: (role) => ({
+            code: 'a11y-no-redundant-roles',
+            message: `A11y: Redundant role '${role}'`
+        }),
+        a11y_accesskey: {
+            code: 'a11y-accesskey',
+            message: 'A11y: Avoid using accesskey'
+        },
+        a11y_autofocus: {
+            code: 'a11y-autofocus',
+            message: 'A11y: Avoid using autofocus'
+        },
+        a11y_misplaced_scope: {
+            code: 'a11y-misplaced-scope',
+            message: 'A11y: The scope attribute should only be used with <th> elements'
+        },
+        a11y_positive_tabindex: {
+            code: 'a11y-positive-tabindex',
+            message: 'A11y: avoid tabindex values above zero'
+        },
+        a11y_invalid_attribute: (href_attribute, href_value) => ({
+            code: 'a11y-invalid-attribute',
+            message: `A11y: '${href_value}' is not a valid ${href_attribute} attribute`
+        }),
+        a11y_missing_attribute: (name, article, sequence) => ({
+            code: 'a11y-missing-attribute',
+            message: `A11y: <${name}> element should have ${article} ${sequence} attribute`
+        }),
+        a11y_img_redundant_alt: {
+            code: 'a11y-img-redundant-alt',
+            message: 'A11y: Screenreaders already announce <img> elements as an image.'
+        },
+        a11y_label_has_associated_control: {
+            code: 'a11y-label-has-associated-control',
+            message: 'A11y: A form label must be associated with a control.'
+        },
+        a11y_media_has_caption: {
+            code: 'a11y-media-has-caption',
+            message: 'A11y: <video> elements must have a <track kind="captions">'
+        },
+        a11y_distracting_elements: (name) => ({
+            code: 'a11y-distracting-elements',
+            message: `A11y: Avoid <${name}> elements`
+        }),
+        a11y_structure_immediate: {
+            code: 'a11y-structure',
+            message: 'A11y: <figcaption> must be an immediate child of <figure>'
+        },
+        a11y_structure_first_or_last: {
+            code: 'a11y-structure',
+            message: 'A11y: <figcaption> must be first or last child of <figure>'
+        },
+        a11y_mouse_events_have_key_events: (event, accompanied_by) => ({
+            code: 'a11y-mouse-events-have-key-events',
+            message: `A11y: on:${event} must be accompanied by on:${accompanied_by}`
+        }),
+        a11y_missing_content: (name) => ({
+            code: 'a11y-missing-content',
+            message: `A11y: <${name}> element should have child content`
+        }),
+        redundant_event_modifier_for_touch: {
+            code: 'redundant-event-modifier',
+            message: 'Touch event handlers that don\'t use the \'event\' object are passive by default'
+        },
+        redundant_event_modifier_passive: {
+            code: 'redundant-event-modifier',
+            message: 'The passive modifier only works with wheel and touch events'
+        }
+    };
+
+    class AbstractBlock extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+        }
+        warn_if_empty_block() {
+            if (!this.children || this.children.length > 1)
+                return;
+            const child = this.children[0];
+            if (!child || (child.type === 'Text' && !/[^ \r\n\f\v\t]/.test(child.data))) {
+                this.component.warn(this, compiler_warnings.empty_block);
+            }
+        }
+    }
+
+    function flatten_reference(node) {
+        const nodes = [];
+        const parts = [];
+        while (node.type === 'MemberExpression') {
+            nodes.unshift(node.property);
+            if (!node.computed) {
+                parts.unshift(node.property.name);
+            }
+            else {
+                const computed_property = to_string$1(node.property);
+                if (computed_property) {
+                    parts.unshift(`[${computed_property}]`);
+                }
+            }
+            node = node.object;
+        }
+        const name = node.type === 'Identifier'
+            ? node.name
+            : node.type === 'ThisExpression' ? 'this' : null;
+        nodes.unshift(node);
+        parts.unshift(name);
+        return { name, nodes, parts };
+    }
+    function to_string$1(node) {
+        switch (node.type) {
+            case 'Literal':
+                return String(node.value);
+            case 'Identifier':
+                return node.name;
+        }
+    }
+
+    function create_scopes(expression) {
+        return analyze(expression);
+    }
+
+    function get_object(node) {
+        while (node.type === 'MemberExpression')
+            node = node.object;
+        return node;
+    }
+
+    const reserved_keywords = new Set(['$$props', '$$restProps', '$$slots']);
+    function is_reserved_keyword(name) {
+        return reserved_keywords.has(name);
+    }
+
+    function is_dynamic(variable) {
+        if (variable) {
+            if (variable.mutated || variable.reassigned)
+                return true; // dynamic internal state
+            if (!variable.module && variable.writable && variable.export_name)
+                return true; // writable props
+            if (is_reserved_keyword(variable.name))
+                return true;
+        }
+        return false;
+    }
+
+    function nodes_match(a, b) {
+        if (!!a !== !!b)
+            return false;
+        if (Array.isArray(a) !== Array.isArray(b))
+            return false;
+        if (a && typeof a === 'object') {
+            if (Array.isArray(a)) {
+                if (a.length !== b.length)
+                    return false;
+                return a.every((child, i) => nodes_match(child, b[i]));
+            }
+            const a_keys = Object.keys(a).sort();
+            const b_keys = Object.keys(b).sort();
+            if (a_keys.length !== b_keys.length)
+                return false;
+            let i = a_keys.length;
+            while (i--) {
+                const key = a_keys[i];
+                if (b_keys[i] !== key)
+                    return false;
+                if (key === 'start' || key === 'end')
+                    continue;
+                if (!nodes_match(a[key], b[key])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return a === b;
+    }
+
+    function invalidate(renderer, scope, node, names, main_execution_context = false) {
+        const { component } = renderer;
+        const [head, ...tail] = Array.from(names)
+            .filter(name => {
+            const owner = scope.find_owner(name);
+            return !owner || owner === component.instance_scope;
+        })
+            .map(name => component.var_lookup.get(name))
+            .filter(variable => {
+            return variable && (!variable.hoistable &&
+                !variable.global &&
+                !variable.module &&
+                (variable.referenced ||
+                    variable.subscribable ||
+                    variable.is_reactive_dependency ||
+                    variable.export_name ||
+                    variable.name[0] === '$'));
+        });
+        function get_invalidated(variable, node) {
+            if (main_execution_context && !variable.subscribable && variable.name[0] !== '$') {
+                return node;
+            }
+            return renderer_invalidate(renderer, variable.name, undefined, main_execution_context);
+        }
+        if (!head) {
+            return node;
+        }
+        component.has_reactive_assignments = true;
+        if (node.type === 'AssignmentExpression' && node.operator === '=' && nodes_match(node.left, node.right) && tail.length === 0) {
+            return get_invalidated(head, node);
+        }
+        const is_store_value = head.name[0] === '$' && head.name[1] !== '$';
+        const extra_args = tail.map(variable => get_invalidated(variable)).filter(Boolean);
+        if (is_store_value) {
+            return x `@set_store_value(${head.name.slice(1)}, ${node}, ${head.name}, ${extra_args})`;
+        }
+        let invalidate;
+        if (!main_execution_context) {
+            const pass_value = (extra_args.length > 0 ||
+                (node.type === 'AssignmentExpression' && node.left.type !== 'Identifier') ||
+                (node.type === 'UpdateExpression' && (!node.prefix || node.argument.type !== 'Identifier')));
+            if (pass_value) {
+                extra_args.unshift({
+                    type: 'Identifier',
+                    name: head.name
+                });
+            }
+            invalidate = x `$$invalidate(${renderer.context_lookup.get(head.name).index}, ${node}, ${extra_args})`;
+        }
+        else {
+            // skip `$$invalidate` if it is in the main execution context
+            invalidate = extra_args.length ? [node, ...extra_args] : node;
+        }
+        if (head.subscribable && head.reassigned) {
+            const subscribe = `$$subscribe_${head.name}`;
+            invalidate = x `${subscribe}(${invalidate})`;
+        }
+        return invalidate;
+    }
+    function renderer_invalidate(renderer, name, value, main_execution_context = false) {
+        const variable = renderer.component.var_lookup.get(name);
+        if (variable && (variable.subscribable && (variable.reassigned || variable.export_name))) {
+            if (main_execution_context) {
+                return x `${`$$subscribe_${name}`}(${value || name})`;
+            }
+            else {
+                const member = renderer.context_lookup.get(name);
+                return x `${`$$subscribe_${name}`}($$invalidate(${member.index}, ${value || name}))`;
+            }
+        }
+        if (name[0] === '$' && name[1] !== '$') {
+            return x `${name.slice(1)}.set(${value || name})`;
+        }
+        if (variable && (variable.module || (!variable.referenced &&
+            !variable.is_reactive_dependency &&
+            !variable.export_name &&
+            !name.startsWith('$$')))) {
+            return value || name;
+        }
+        if (value) {
+            if (main_execution_context) {
+                return x `${value}`;
+            }
+            else {
+                const member = renderer.context_lookup.get(name);
+                return x `$$invalidate(${member.index}, ${value})`;
+            }
+        }
+        if (main_execution_context)
+            return;
+        // if this is a reactive declaration, invalidate dependencies recursively
+        const deps = new Set([name]);
+        deps.forEach(name => {
+            const reactive_declarations = renderer.component.reactive_declarations.filter(x => x.assignees.has(name));
+            reactive_declarations.forEach(declaration => {
+                declaration.dependencies.forEach(name => {
+                    deps.add(name);
+                });
+            });
+        });
+        // TODO ideally globals etc wouldn't be here in the first place
+        const filtered = Array.from(deps).filter(n => renderer.context_lookup.has(n));
+        if (!filtered.length)
+            return null;
+        return filtered
+            .map(n => x `$$invalidate(${renderer.context_lookup.get(n).index}, ${n})`)
+            .reduce((lhs, rhs) => x `${lhs}, ${rhs}`);
+    }
+
+    function replace_object(node, replacement) {
+        if (node.type === 'Identifier')
+            return replacement;
+        const ancestor = node;
+        let parent;
+        while (node.type === 'MemberExpression') {
+            parent = node;
+            node = node.object;
+        }
+        parent.object = replacement;
+        return ancestor;
+    }
+
+    function is_contextual(component, scope, name) {
+        if (is_reserved_keyword(name))
+            return true;
+        // if it's a name below root scope, it's contextual
+        if (!scope.is_top_level(name))
+            return true;
+        const variable = component.var_lookup.get(name);
+        // hoistables, module declarations, and imports are non-contextual
+        if (!variable || variable.hoistable)
+            return false;
+        // assume contextual
+        return true;
+    }
+
+    // adapted from klona v2.0.4 - https://github.com/lukeed/klona
+    // (c) Luke Edwards, under MIT License
+    // The sole modification is to skip function values in objects when cloning, so we don't break tests.
+    function clone(val) {
+        let k, out, tmp;
+        if (Array.isArray(val)) {
+            out = Array(k = val.length);
+            while (k--)
+                out[k] = (tmp = val[k]) && typeof tmp === 'object' ? clone(tmp) : tmp;
+            return out;
+        }
+        if (Object.prototype.toString.call(val) === '[object Object]') {
+            out = {}; // null
+            for (k in val) {
+                if (k === '__proto__') {
+                    Object.defineProperty(out, k, {
+                        value: clone(val[k]),
+                        configurable: true,
+                        enumerable: true,
+                        writable: true
+                    });
+                }
+                else if (typeof val[k] !== 'function') { // MODIFICATION: skip functions
+                    out[k] = (tmp = val[k]) && typeof tmp === 'object' ? clone(tmp) : tmp;
+                }
+            }
+            return out;
+        }
+        return val;
+    }
+
+    // All compiler errors should be listed and accessed from here
+    /**
+     * @internal
+     */
+    var compiler_errors = {
+        invalid_binding_elements: (element, binding) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' is not a valid binding on <${element}> elements`
+        }),
+        invalid_binding_element_with: (elements, binding) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' binding can only be used with ${elements}`
+        }),
+        invalid_binding_on: (binding, element, post) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' is not a valid binding on ${element}` + (post || '')
+        }),
+        invalid_binding_foreign: (binding) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' is not a valid binding. Foreign elements only support bind:this`
+        }),
+        invalid_binding_no_checkbox: (binding, is_radio) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' binding can only be used with <input type="checkbox">` + (is_radio ? ' — for <input type="radio">, use \'group\' binding' : '')
+        }),
+        invalid_binding: (binding) => ({
+            code: 'invalid-binding',
+            message: `'${binding}' is not a valid binding`
+        }),
+        invalid_binding_window: (parts) => ({
+            code: 'invalid-binding',
+            message: `Bindings on <svelte:window> must be to top-level properties, e.g. '${parts[parts.length - 1]}' rather than '${parts.join('.')}'`
+        }),
+        invalid_binding_let: {
+            code: 'invalid-binding',
+            message: 'Cannot bind to a variable declared with the let: directive'
+        },
+        invalid_binding_await: {
+            code: 'invalid-binding',
+            message: 'Cannot bind to a variable declared with {#await ... then} or {:catch} blocks'
+        },
+        invalid_binding_const: {
+            code: 'invalid-binding',
+            message: 'Cannot bind to a variable declared with {@const ...}'
+        },
+        invalid_binding_writibale: {
+            code: 'invalid-binding',
+            message: 'Cannot bind to a variable which is not writable'
+        },
+        binding_undeclared: (name) => ({
+            code: 'binding-undeclared',
+            message: `${name} is not declared`
+        }),
+        invalid_type: {
+            code: 'invalid-type',
+            message: '\'type\' attribute cannot be dynamic if input uses two-way binding'
+        },
+        missing_type: {
+            code: 'missing-type',
+            message: '\'type\' attribute must be specified'
+        },
+        dynamic_multiple_attribute: {
+            code: 'dynamic-multiple-attribute',
+            message: '\'multiple\' attribute cannot be dynamic if select uses two-way binding'
+        },
+        missing_contenteditable_attribute: {
+            code: 'missing-contenteditable-attribute',
+            message: '\'contenteditable\' attribute is required for textContent and innerHTML two-way bindings'
+        },
+        dynamic_contenteditable_attribute: {
+            code: 'dynamic-contenteditable-attribute',
+            message: '\'contenteditable\' attribute cannot be dynamic if element uses two-way binding'
+        },
+        invalid_event_modifier_combination: (modifier1, modifier2) => ({
+            code: 'invalid-event-modifier',
+            message: `The '${modifier1}' and '${modifier2}' modifiers cannot be used together`
+        }),
+        invalid_event_modifier_legacy: (modifier) => ({
+            code: 'invalid-event-modifier',
+            message: `The '${modifier}' modifier cannot be used in legacy mode`
+        }),
+        invalid_event_modifier: (valid) => ({
+            code: 'invalid-event-modifier',
+            message: `Valid event modifiers are ${valid}`
+        }),
+        invalid_event_modifier_component: {
+            code: 'invalid-event-modifier',
+            message: "Event modifiers other than 'once' can only be used on DOM elements"
+        },
+        textarea_duplicate_value: {
+            code: 'textarea-duplicate-value',
+            message: 'A <textarea> can have either a value attribute or (equivalently) child content, but not both'
+        },
+        illegal_attribute: (name) => ({
+            code: 'illegal-attribute',
+            message: `'${name}' is not a valid attribute name`
+        }),
+        invalid_slot_attribute: {
+            code: 'invalid-slot-attribute',
+            message: 'slot attribute cannot have a dynamic value'
+        },
+        duplicate_slot_attribute: (name) => ({
+            code: 'duplicate-slot-attribute',
+            message: `Duplicate '${name}' slot`
+        }),
+        invalid_slotted_content: {
+            code: 'invalid-slotted-content',
+            message: 'Element with a slot=\'...\' attribute must be a child of a component or a descendant of a custom element'
+        },
+        invalid_attribute_head: {
+            code: 'invalid-attribute',
+            message: '<svelte:head> should not have any attributes or directives'
+        },
+        invalid_action: {
+            code: 'invalid-action',
+            message: 'Actions can only be applied to DOM elements, not components'
+        },
+        invalid_class: {
+            code: 'invalid-class',
+            message: 'Classes can only be applied to DOM elements, not components'
+        },
+        invalid_transition: {
+            code: 'invalid-transition',
+            message: 'Transitions can only be applied to DOM elements, not components'
+        },
+        invalid_let: {
+            code: 'invalid-let',
+            message: 'let directive value must be an identifier or an object/array pattern'
+        },
+        invalid_slot_directive: {
+            code: 'invalid-slot-directive',
+            message: '<slot> cannot have directives'
+        },
+        dynamic_slot_name: {
+            code: 'dynamic-slot-name',
+            message: '<slot> name cannot be dynamic'
+        },
+        invalid_slot_name: {
+            code: 'invalid-slot-name',
+            message: 'default is a reserved word — it cannot be used as a slot name'
+        },
+        invalid_slot_attribute_value_missing: {
+            code: 'invalid-slot-attribute',
+            message: 'slot attribute value is missing'
+        },
+        invalid_slotted_content_fragment: {
+            code: 'invalid-slotted-content',
+            message: '<svelte:fragment> must be a child of a component'
+        },
+        illegal_attribute_title: {
+            code: 'illegal-attribute',
+            message: '<title> cannot have attributes'
+        },
+        illegal_structure_title: {
+            code: 'illegal-structure',
+            message: '<title> can only contain text and {tags}'
+        },
+        duplicate_transition: (directive, parent_directive) => {
+            function describe(_directive) {
+                return _directive === 'transition'
+                    ? "a 'transition'"
+                    : `an '${_directive}'`;
+            }
+            const message = directive === parent_directive
+                ? `An element can only have one '${directive}' directive`
+                : `An element cannot have both ${describe(parent_directive)} directive and ${describe(directive)} directive`;
+            return {
+                code: 'duplicate-transition',
+                message
+            };
+        },
+        contextual_store: {
+            code: 'contextual-store',
+            message: 'Stores must be declared at the top level of the component (this may change in a future version of Svelte)'
+        },
+        default_export: {
+            code: 'default-export',
+            message: 'A component cannot have a default export'
+        },
+        illegal_declaration: {
+            code: 'illegal-declaration',
+            message: 'The $ prefix is reserved, and cannot be used for variable and import names'
+        },
+        illegal_subscription: {
+            code: 'illegal-subscription',
+            message: 'Cannot reference store value inside <script context="module">'
+        },
+        illegal_global: (name) => ({
+            code: 'illegal-global',
+            message: `${name} is an illegal variable name`
+        }),
+        illegal_variable_declaration: {
+            code: 'illegal-variable-declaration',
+            message: 'Cannot declare same variable name which is imported inside <script context="module">'
+        },
+        cyclical_reactive_declaration: (cycle) => ({
+            code: 'cyclical-reactive-declaration',
+            message: `Cyclical dependency detected: ${cycle.join(' → ')}`
+        }),
+        invalid_tag_property: {
+            code: 'invalid-tag-property',
+            message: "tag name must be two or more words joined by the '-' character"
+        },
+        invalid_tag_attribute: {
+            code: 'invalid-tag-attribute',
+            message: "'tag' must be a string literal"
+        },
+        invalid_namespace_property: (namespace, suggestion) => ({
+            code: 'invalid-namespace-property',
+            message: `Invalid namespace '${namespace}'` + (suggestion ? ` (did you mean '${suggestion}'?)` : '')
+        }),
+        invalid_namespace_attribute: {
+            code: 'invalid-namespace-attribute',
+            message: "The 'namespace' attribute must be a string literal representing a valid namespace"
+        },
+        invalid_attribute_value: (name) => ({
+            code: `invalid-${name}-value`,
+            message: `${name} attribute must be true or false`
+        }),
+        invalid_options_attribute_unknown: {
+            code: 'invalid-options-attribute',
+            message: '<svelte:options> unknown attribute'
+        },
+        invalid_options_attribute: {
+            code: 'invalid-options-attribute',
+            message: "<svelte:options> can only have static 'tag', 'namespace', 'accessors', 'immutable' and 'preserveWhitespace' attributes"
+        },
+        css_invalid_global: {
+            code: 'css-invalid-global',
+            message: ':global(...) can be at the start or end of a selector sequence, but not in the middle'
+        },
+        css_invalid_global_selector: {
+            code: 'css-invalid-global-selector',
+            message: ':global(...) must contain a single selector'
+        },
+        duplicate_animation: {
+            code: 'duplicate-animation',
+            message: "An element can only have one 'animate' directive"
+        },
+        invalid_animation_immediate: {
+            code: 'invalid-animation',
+            message: 'An element that uses the animate directive must be the immediate child of a keyed each block'
+        },
+        invalid_animation_key: {
+            code: 'invalid-animation',
+            message: 'An element that uses the animate directive must be used inside a keyed each block. Did you forget to add a key to your each block?'
+        },
+        invalid_animation_sole: {
+            code: 'invalid-animation',
+            message: 'An element that uses the animate directive must be the sole child of a keyed each block'
+        },
+        invalid_animation_dynamic_element: {
+            code: 'invalid-animation',
+            message: '<svelte:element> cannot have a animate directive'
+        },
+        invalid_directive_value: {
+            code: 'invalid-directive-value',
+            message: 'Can only bind to an identifier (e.g. `foo`) or a member expression (e.g. `foo.bar` or `foo[baz]`)'
+        },
+        invalid_const_placement: {
+            code: 'invalid-const-placement',
+            message: '{@const} must be the immediate child of {#if}, {:else if}, {:else}, {#each}, {:then}, {:catch}, <svelte:fragment> or <Component>'
+        },
+        invalid_const_declaration: (name) => ({
+            code: 'invalid-const-declaration',
+            message: `'${name}' has already been declared`
+        }),
+        invalid_const_update: (name) => ({
+            code: 'invalid-const-update',
+            message: `'${name}' is declared using {@const ...} and is read-only`
+        }),
+        cyclical_const_tags: (cycle) => ({
+            code: 'cyclical-const-tags',
+            message: `Cyclical dependency detected: ${cycle.join(' → ')}`
+        }),
+        invalid_component_style_directive: {
+            code: 'invalid-component-style-directive',
+            message: 'Style directives cannot be used on components'
+        }
+    };
+
+    class Expression {
+        constructor(component, owner, template_scope, info, lazy) {
+            this.type = 'Expression';
+            this.references = new Set();
+            this.dependencies = new Set();
+            this.contextual_dependencies = new Set();
+            this.declarations = [];
+            this.uses_context = false;
+            // TODO revert to direct property access in prod?
+            Object.defineProperties(this, {
+                component: {
+                    value: component
+                }
+            });
+            this.node = info;
+            this.template_scope = template_scope;
+            this.owner = owner;
+            const { dependencies, contextual_dependencies, references } = this;
+            let { map, scope } = create_scopes(info);
+            this.scope = scope;
+            this.scope_map = map;
+            const expression = this;
+            let function_expression;
+            // discover dependencies, but don't change the code yet
+            walk(info, {
+                enter(node, parent, key) {
+                    // don't manipulate shorthand props twice
+                    if (key === 'key' && parent.shorthand)
+                        return;
+                    // don't manipulate `import.meta`, `new.target`
+                    if (node.type === 'MetaProperty')
+                        return this.skip();
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                    if (!function_expression && /FunctionExpression/.test(node.type)) {
+                        function_expression = node;
+                    }
+                    if (is_reference(node, parent)) {
+                        const { name, nodes } = flatten_reference(node);
+                        references.add(name);
+                        if (scope.has(name))
+                            return;
+                        if (name[0] === '$') {
+                            const store_name = name.slice(1);
+                            if (template_scope.names.has(store_name) || scope.has(store_name)) {
+                                return component.error(node, compiler_errors.contextual_store);
+                            }
+                        }
+                        if (template_scope.is_let(name)) {
+                            if (!lazy) {
+                                contextual_dependencies.add(name);
+                                dependencies.add(name);
+                            }
+                        }
+                        else if (template_scope.names.has(name)) {
+                            expression.uses_context = true;
+                            contextual_dependencies.add(name);
+                            const owner = template_scope.get_owner(name);
+                            const is_index = owner.type === 'EachBlock' && owner.key && name === owner.index;
+                            if (!lazy || is_index) {
+                                template_scope.dependencies_for_name.get(name).forEach(name => dependencies.add(name));
+                            }
+                        }
+                        else {
+                            if (!lazy) {
+                                dependencies.add(name);
+                            }
+                            component.add_reference(node, name);
+                            component.warn_if_undefined(name, nodes[0], template_scope);
+                        }
+                        this.skip();
+                    }
+                    // track any assignments from template expressions as mutable
+                    let names;
+                    let deep = false;
+                    if (function_expression) {
+                        if (node.type === 'AssignmentExpression') {
+                            deep = node.left.type === 'MemberExpression';
+                            names = extract_names(deep ? get_object(node.left) : node.left);
+                        }
+                        else if (node.type === 'UpdateExpression') {
+                            names = extract_names(get_object(node.argument));
+                        }
+                    }
+                    if (names) {
+                        names.forEach(name => {
+                            if (template_scope.names.has(name)) {
+                                if (template_scope.is_const(name)) {
+                                    component.error(node, compiler_errors.invalid_const_update(name));
+                                }
+                                template_scope.dependencies_for_name.get(name).forEach(name => {
+                                    const variable = component.var_lookup.get(name);
+                                    if (variable)
+                                        variable[deep ? 'mutated' : 'reassigned'] = true;
+                                });
+                                const each_block = template_scope.get_owner(name);
+                                each_block.has_binding = true;
+                            }
+                            else {
+                                component.add_reference(node, name);
+                                const variable = component.var_lookup.get(name);
+                                if (variable)
+                                    variable[deep ? 'mutated' : 'reassigned'] = true;
+                            }
+                        });
+                    }
+                },
+                leave(node) {
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                    if (node === function_expression) {
+                        function_expression = null;
+                    }
+                }
+            });
+        }
+        dynamic_dependencies() {
+            return Array.from(this.dependencies).filter(name => {
+                if (this.template_scope.is_let(name))
+                    return true;
+                if (is_reserved_keyword(name))
+                    return true;
+                const variable = this.component.var_lookup.get(name);
+                return is_dynamic(variable);
+            });
+        }
+        // TODO move this into a render-dom wrapper?
+        manipulate(block, ctx) {
+            // TODO ideally we wouldn't end up calling this method
+            // multiple times
+            if (this.manipulated)
+                return this.manipulated;
+            const { component, declarations, scope_map: map, template_scope, owner } = this;
+            let scope = this.scope;
+            let function_expression;
+            let dependencies;
+            let contextual_dependencies;
+            const node = walk(this.node, {
+                enter(node, parent) {
+                    if (node.type === 'Property' && node.shorthand) {
+                        node.value = clone(node.value);
+                        node.shorthand = false;
+                    }
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                    if (node.type === 'Identifier' && is_reference(node, parent)) {
+                        const { name } = flatten_reference(node);
+                        if (scope.has(name))
+                            return;
+                        if (function_expression) {
+                            if (template_scope.names.has(name)) {
+                                contextual_dependencies.add(name);
+                                template_scope.dependencies_for_name.get(name).forEach(dependency => {
+                                    dependencies.add(dependency);
+                                });
+                            }
+                            else {
+                                dependencies.add(name);
+                                component.add_reference(node, name); // TODO is this redundant/misplaced?
+                            }
+                        }
+                        else if (is_contextual(component, template_scope, name)) {
+                            const reference = block.renderer.reference(node, ctx);
+                            this.replace(reference);
+                        }
+                        this.skip();
+                    }
+                    if (!function_expression) {
+                        if (node.type === 'AssignmentExpression') ;
+                        if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+                            function_expression = node;
+                            dependencies = new Set();
+                            contextual_dependencies = new Set();
+                        }
+                    }
+                },
+                leave(node, parent) {
+                    if (map.has(node))
+                        scope = scope.parent;
+                    if (node === function_expression) {
+                        const id = component.get_unique_name(sanitize(get_function_name(node, owner)));
+                        const declaration = b `const ${id} = ${node}`;
+                        if (owner.type === 'ConstTag') {
+                            let child_scope = scope;
+                            walk(node, {
+                                enter(node, parent) {
+                                    if (map.has(node))
+                                        child_scope = map.get(node);
+                                    if (node.type === 'Identifier' && is_reference(node, parent)) {
+                                        if (child_scope.has(node.name))
+                                            return;
+                                        this.replace(block.renderer.reference(node, ctx));
+                                    }
+                                },
+                                leave(node) {
+                                    if (map.has(node))
+                                        child_scope = child_scope.parent;
+                                }
+                            });
+                        }
+                        else if (dependencies.size === 0 && contextual_dependencies.size === 0) {
+                            // we can hoist this out of the component completely
+                            component.fully_hoisted.push(declaration);
+                            this.replace(id);
+                            component.add_var(node, {
+                                name: id.name,
+                                internal: true,
+                                hoistable: true,
+                                referenced: true
+                            });
+                        }
+                        else if (contextual_dependencies.size === 0) {
+                            // function can be hoisted inside the component init
+                            component.partly_hoisted.push(declaration);
+                            block.renderer.add_to_context(id.name);
+                            this.replace(block.renderer.reference(id));
+                        }
+                        else {
+                            // we need a combo block/init recipe
+                            const deps = Array.from(contextual_dependencies);
+                            const function_expression = node;
+                            const has_args = function_expression.params.length > 0;
+                            function_expression.params = [
+                                ...deps.map(name => ({ type: 'Identifier', name })),
+                                ...function_expression.params
+                            ];
+                            const context_args = deps.map(name => block.renderer.reference(name));
+                            component.partly_hoisted.push(declaration);
+                            block.renderer.add_to_context(id.name);
+                            const callee = block.renderer.reference(id);
+                            this.replace(id);
+                            const func_declaration = has_args
+                                ? b `function ${id}(...args) {
+								return ${callee}(${context_args}, ...args);
+							}`
+                                : b `function ${id}() {
+								return ${callee}(${context_args});
+							}`;
+                            if (owner.type === 'Attribute' && owner.parent.name === 'slot') {
+                                const dep_scopes = new Set(deps.map(name => template_scope.get_owner(name)));
+                                // find the nearest scopes
+                                let node = owner.parent;
+                                while (node && !dep_scopes.has(node)) {
+                                    node = node.parent;
+                                }
+                                const func_expression = func_declaration[0];
+                                if (node.type === 'InlineComponent') {
+                                    // <Comp let:data />
+                                    this.replace(func_expression);
+                                }
+                                else {
+                                    // {#each}, {#await}
+                                    const func_id = component.get_unique_name(id.name + '_func');
+                                    block.renderer.add_to_context(func_id.name, true);
+                                    // rename #ctx -> child_ctx;
+                                    walk(func_expression, {
+                                        enter(node) {
+                                            if (node.type === 'Identifier' && node.name === '#ctx') {
+                                                node.name = 'child_ctx';
+                                            }
+                                        }
+                                    });
+                                    // add to get_xxx_context
+                                    // child_ctx[x] = function () { ... }
+                                    template_scope.get_owner(deps[0]).contexts.push({
+                                        key: func_id,
+                                        modifier: () => func_expression,
+                                        default_modifier: node => node
+                                    });
+                                    this.replace(block.renderer.reference(func_id));
+                                }
+                            }
+                            else {
+                                declarations.push(func_declaration);
+                            }
+                        }
+                        function_expression = null;
+                        dependencies = null;
+                        contextual_dependencies = null;
+                        if (parent && parent.type === 'Property') {
+                            parent.method = false;
+                        }
+                    }
+                    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+                        const assignee = node.type === 'AssignmentExpression' ? node.left : node.argument;
+                        const object_name = get_object(assignee).name;
+                        if (scope.has(object_name))
+                            return;
+                        // normally (`a = 1`, `b.c = 2`), there'll be a single name
+                        // (a or b). In destructuring cases (`[d, e] = [e, d]`) there
+                        // may be more, in which case we need to tack the extra ones
+                        // onto the initial function call
+                        const names = new Set(extract_names(assignee));
+                        const traced = new Set();
+                        names.forEach(name => {
+                            const dependencies = template_scope.dependencies_for_name.get(name);
+                            if (dependencies) {
+                                dependencies.forEach(name => traced.add(name));
+                            }
+                            else {
+                                traced.add(name);
+                            }
+                        });
+                        const context = block.bindings.get(object_name);
+                        if (context) {
+                            // for `{#each array as item}`
+                            // replace `item = 1` to `each_array[each_index] = 1`, this allow us to mutate the array
+                            // rather than mutating the local `item` variable
+                            const { snippet, object, property } = context;
+                            const replaced = replace_object(assignee, snippet);
+                            if (node.type === 'AssignmentExpression') {
+                                node.left = replaced;
+                            }
+                            else {
+                                node.argument = replaced;
+                            }
+                            contextual_dependencies.add(object.name);
+                            contextual_dependencies.add(property.name);
+                        }
+                        this.replace(invalidate(block.renderer, scope, node, traced));
+                    }
+                }
+            });
+            if (declarations.length > 0) {
+                block.maintain_context = true;
+                declarations.forEach(declaration => {
+                    block.chunks.init.push(declaration);
+                });
+            }
+            return (this.manipulated = node);
+        }
+    }
+    function get_function_name(_node, parent) {
+        if (parent.type === 'EventHandler') {
+            return `${parent.name}_handler`;
+        }
+        if (parent.type === 'Action') {
+            return `${parent.name}_function`;
+        }
+        return 'func';
+    }
+
+    function unpack_destructuring({ contexts, node, modifier = (node) => node, default_modifier = (node) => node, scope, component }) {
+        if (!node)
+            return;
+        if (node.type === 'Identifier') {
+            contexts.push({
+                key: node,
+                modifier,
+                default_modifier
+            });
+        }
+        else if (node.type === 'RestElement') {
+            contexts.push({
+                key: node.argument,
+                modifier,
+                default_modifier
+            });
+        }
+        else if (node.type === 'ArrayPattern') {
+            node.elements.forEach((element, i) => {
+                if (element && element.type === 'RestElement') {
+                    unpack_destructuring({
+                        contexts,
+                        node: element,
+                        modifier: (node) => x `${modifier(node)}.slice(${i})`,
+                        default_modifier,
+                        scope,
+                        component
+                    });
+                }
+                else if (element && element.type === 'AssignmentPattern') {
+                    const n = contexts.length;
+                    mark_referenced(element.right, scope, component);
+                    unpack_destructuring({
+                        contexts,
+                        node: element.left,
+                        modifier: (node) => x `${modifier(node)}[${i}]`,
+                        default_modifier: (node, to_ctx) => x `${node} !== undefined ? ${node} : ${update_reference(contexts, n, element.right, to_ctx)}`,
+                        scope,
+                        component
+                    });
+                }
+                else {
+                    unpack_destructuring({
+                        contexts,
+                        node: element,
+                        modifier: (node) => x `${modifier(node)}[${i}]`,
+                        default_modifier,
+                        scope,
+                        component
+                    });
+                }
+            });
+        }
+        else if (node.type === 'ObjectPattern') {
+            const used_properties = [];
+            node.properties.forEach((property) => {
+                if (property.type === 'RestElement') {
+                    unpack_destructuring({
+                        contexts,
+                        node: property.argument,
+                        modifier: (node) => x `@object_without_properties(${modifier(node)}, [${used_properties}])`,
+                        default_modifier,
+                        scope,
+                        component
+                    });
+                }
+                else {
+                    const key = property.key;
+                    const value = property.value;
+                    used_properties.push(x `"${key.name}"`);
+                    if (value.type === 'AssignmentPattern') {
+                        const n = contexts.length;
+                        mark_referenced(value.right, scope, component);
+                        unpack_destructuring({
+                            contexts,
+                            node: value.left,
+                            modifier: (node) => x `${modifier(node)}.${key.name}`,
+                            default_modifier: (node, to_ctx) => x `${node} !== undefined ? ${node} : ${update_reference(contexts, n, value.right, to_ctx)}`,
+                            scope,
+                            component
+                        });
+                    }
+                    else {
+                        unpack_destructuring({
+                            contexts,
+                            node: value,
+                            modifier: (node) => x `${modifier(node)}.${key.name}`,
+                            default_modifier,
+                            scope,
+                            component
+                        });
+                    }
+                }
+            });
+        }
+    }
+    function update_reference(contexts, n, expression, to_ctx) {
+        const find_from_context = (node) => {
+            for (let i = n; i < contexts.length; i++) {
+                const { key } = contexts[i];
+                if (node.name === key.name) {
+                    throw new Error(`Cannot access '${node.name}' before initialization`);
+                }
+            }
+            return to_ctx(node.name);
+        };
+        if (expression.type === 'Identifier') {
+            return find_from_context(expression);
+        }
+        // NOTE: avoid unnecessary deep clone?
+        expression = clone(expression);
+        walk(expression, {
+            enter(node, parent) {
+                if (is_reference(node, parent)) {
+                    this.replace(find_from_context(node));
+                    this.skip();
+                }
+            }
+        });
+        return expression;
+    }
+    function mark_referenced(node, scope, component) {
+        walk(node, {
+            enter(node, parent) {
+                if (is_reference(node, parent)) {
+                    const { name } = flatten_reference(node);
+                    if (!scope.is_let(name) && !scope.names.has(name)) {
+                        component.add_reference(node, name);
+                    }
+                }
+            }
+        });
+    }
+
+    const allowed_parents = new Set(['EachBlock', 'CatchBlock', 'ThenBlock', 'InlineComponent', 'SlotTemplate', 'IfBlock', 'ElseBlock']);
+    class ConstTag extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.contexts = [];
+            this.assignees = new Set();
+            this.dependencies = new Set();
+            if (!allowed_parents.has(parent.type)) {
+                component.error(info, compiler_errors.invalid_const_placement);
+            }
+            this.node = info;
+            this.scope = scope;
+            const { assignees, dependencies } = this;
+            extract_identifiers(info.expression.left).forEach(({ name }) => {
+                assignees.add(name);
+                const owner = this.scope.get_owner(name);
+                if (owner === parent) {
+                    component.error(info, compiler_errors.invalid_const_declaration(name));
+                }
+            });
+            walk(info.expression.right, {
+                enter(node, parent) {
+                    if (is_reference(node, parent)) {
+                        const identifier = get_object(node);
+                        const { name } = identifier;
+                        dependencies.add(name);
+                    }
+                }
+            });
+        }
+        parse_expression() {
+            unpack_destructuring({
+                contexts: this.contexts,
+                node: this.node.expression.left,
+                scope: this.scope,
+                component: this.component
+            });
+            this.expression = new Expression(this.component, this, this.scope, this.node.expression.right);
+            this.contexts.forEach(context => {
+                const owner = this.scope.get_owner(context.key.name);
+                if (owner && owner.type === 'ConstTag' && owner.parent === this.parent) {
+                    this.component.error(this.node, compiler_errors.invalid_const_declaration(context.key.name));
+                }
+                this.scope.add(context.key.name, this.expression.dependencies, this);
+            });
+        }
+    }
+
+    class PendingBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.children = map_children(component, parent, scope, info.children);
+            if (!info.skip) {
+                this.warn_if_empty_block();
+            }
+        }
+    }
+
+    class CatchBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.scope = scope.child();
+            if (parent.catch_node) {
+                parent.catch_contexts.forEach(context => {
+                    this.scope.add(context.key.name, parent.expression.dependencies, this);
+                });
+            }
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, parent));
+            if (!info.skip) {
+                this.warn_if_empty_block();
+            }
+        }
+    }
+
+    class AwaitBlock extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.expression = new Expression(component, this, scope, info.expression);
+            this.then_node = info.value;
+            this.catch_node = info.error;
+            if (this.then_node) {
+                this.then_contexts = [];
+                unpack_destructuring({ contexts: this.then_contexts, node: info.value, scope, component });
+            }
+            if (this.catch_node) {
+                this.catch_contexts = [];
+                unpack_destructuring({ contexts: this.catch_contexts, node: info.error, scope, component });
+            }
+            this.pending = new PendingBlock(component, this, scope, info.pending);
+            this.then = new ThenBlock(component, this, scope, info.then);
+            this.catch = new CatchBlock(component, this, scope, info.catch);
+        }
+    }
+
+    class EventHandler extends Node$1 {
+        constructor(component, parent, template_scope, info) {
+            super(component, parent, template_scope, info);
+            this.uses_context = false;
+            this.can_make_passive = false;
+            this.name = info.name;
+            this.modifiers = new Set(info.modifiers);
+            if (info.expression) {
+                this.expression = new Expression(component, this, template_scope, info.expression);
+                this.uses_context = this.expression.uses_context;
+                if (/FunctionExpression/.test(info.expression.type) && info.expression.params.length === 0) {
+                    // TODO make this detection more accurate — if `event.preventDefault` isn't called, and
+                    // `event` is passed to another function, we can make it passive
+                    this.can_make_passive = true;
+                }
+                else if (info.expression.type === 'Identifier') {
+                    let node = component.node_for_declaration.get(info.expression.name);
+                    if (node) {
+                        if (node.type === 'VariableDeclaration') {
+                            // for `const handleClick = () => {...}`, we want the [arrow] function expression node
+                            const declarator = node.declarations.find(d => d.id.name === info.expression.name);
+                            node = declarator && declarator.init;
+                        }
+                        if (node && (node.type === 'FunctionExpression' || node.type === 'FunctionDeclaration' || node.type === 'ArrowFunctionExpression') && node.params.length === 0) {
+                            this.can_make_passive = true;
+                        }
+                    }
+                }
+            }
+            else {
+                this.handler_name = component.get_unique_name(`${sanitize(this.name)}_handler`);
+            }
+        }
+        get reassigned() {
+            if (!this.expression) {
+                return false;
+            }
+            const node = this.expression.node;
+            if (/FunctionExpression/.test(node.type)) {
+                return false;
+            }
+            return this.expression.dynamic_dependencies().length > 0;
+        }
+    }
+
+    class Action extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            const object = info.name.split('.')[0];
+            component.warn_if_undefined(object, info, scope);
+            this.name = info.name;
+            component.add_reference(this, object);
+            this.expression = info.expression
+                ? new Expression(component, this, scope, info.expression)
+                : null;
+            this.template_scope = scope;
+            this.uses_context = this.expression && this.expression.uses_context;
+        }
+    }
+
+    class Body extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.handlers = [];
+            this.actions = [];
+            info.attributes.forEach((node) => {
+                if (node.type === 'EventHandler') {
+                    this.handlers.push(new EventHandler(component, this, scope, node));
+                }
+                else if (node.type === 'Action') {
+                    this.actions.push(new Action(component, this, scope, node));
+                }
+            });
+        }
+    }
+
+    class Comment$1 extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.data = info.data;
+            this.ignores = info.ignores;
+        }
+    }
+
+    class ElseBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.scope = scope.child();
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, this));
+            this.warn_if_empty_block();
+        }
+    }
+
+    class EachBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.has_binding = false;
+            this.has_index_binding = false;
+            this.expression = new Expression(component, this, scope, info.expression);
+            this.context = info.context.name || 'each'; // TODO this is used to facilitate binding; currently fails with destructuring
+            this.context_node = info.context;
+            this.index = info.index;
+            this.scope = scope.child();
+            this.contexts = [];
+            unpack_destructuring({ contexts: this.contexts, node: info.context, scope, component });
+            this.contexts.forEach(context => {
+                this.scope.add(context.key.name, this.expression.dependencies, this);
+            });
+            if (this.index) {
+                // index can only change if this is a keyed each block
+                const dependencies = info.key ? this.expression.dependencies : new Set([]);
+                this.scope.add(this.index, dependencies, this);
+            }
+            this.key = info.key
+                ? new Expression(component, this, this.scope, info.key)
+                : null;
+            this.has_animation = false;
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, this));
+            if (this.has_animation) {
+                this.children = this.children.filter(child => !isEmptyNode(child) && !isCommentNode(child));
+                if (this.children.length !== 1) {
+                    const child = this.children.find(child => !!child.animation);
+                    component.error(child.animation, compiler_errors.invalid_animation_sole);
+                    return;
+                }
+            }
+            this.warn_if_empty_block();
+            this.else = info.else
+                ? new ElseBlock(component, this, this.scope, info.else)
+                : null;
+        }
+    }
+    function isEmptyNode(node) {
+        return node.type === 'Text' && node.data.trim() === '';
+    }
+    function isCommentNode(node) {
+        return node.type === 'Comment';
+    }
+
+    function string_literal(data) {
+        return {
+            type: 'Literal',
+            value: data
+        };
+    }
+    const escaped = {
+        '"': '&quot;',
+        "'": '&#39;',
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;'
+    };
+    function escape_html(html) {
+        return String(html).replace(/["'&<>]/g, match => escaped[match]);
+    }
+    function escape_template(str) {
+        return str.replace(/(\${|`|\\)/g, '\\$1');
+    }
+
+    function add_to_set(a, b) {
+        // @ts-ignore
+        b.forEach(item => {
+            a.add(item);
+        });
+    }
+
+    class Attribute extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.scope = scope;
+            if (info.type === 'Spread') {
+                this.name = null;
+                this.is_spread = true;
+                this.is_true = false;
+                this.expression = new Expression(component, this, scope, info.expression);
+                this.dependencies = this.expression.dependencies;
+                this.chunks = null;
+                this.is_static = false;
+            }
+            else {
+                this.name = info.name;
+                this.is_true = info.value === true;
+                this.is_static = true;
+                this.dependencies = new Set();
+                this.chunks = this.is_true
+                    ? []
+                    : info.value.map(node => {
+                        if (node.type === 'Text')
+                            return node;
+                        this.is_static = false;
+                        const expression = new Expression(component, this, scope, node.expression);
+                        add_to_set(this.dependencies, expression.dependencies);
+                        return expression;
+                    });
+            }
+        }
+        get_dependencies() {
+            if (this.is_spread)
+                return this.expression.dynamic_dependencies();
+            const dependencies = new Set();
+            this.chunks.forEach(chunk => {
+                if (chunk.type === 'Expression') {
+                    add_to_set(dependencies, chunk.dynamic_dependencies());
+                }
+            });
+            return Array.from(dependencies);
+        }
+        get_value(block) {
+            if (this.is_true)
+                return x `true`;
+            if (this.chunks.length === 0)
+                return x `""`;
+            if (this.chunks.length === 1) {
+                return this.chunks[0].type === 'Text'
+                    ? string_literal(this.chunks[0].data)
+                    : this.chunks[0].manipulate(block);
+            }
+            let expression = this.chunks
+                .map(chunk => chunk.type === 'Text' ? string_literal(chunk.data) : chunk.manipulate(block))
+                .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+            if (this.chunks[0].type !== 'Text') {
+                expression = x `"" + ${expression}`;
+            }
+            return expression;
+        }
+        get_static_value() {
+            if (!this.is_static)
+                return null;
+            return this.is_true
+                ? true
+                : this.chunks[0]
+                    // method should be called only when `is_static = true`
+                    ? this.chunks[0].data
+                    : '';
+        }
+        should_cache() {
+            return this.is_static
+                ? false
+                : this.chunks.length === 1
+                    // @ts-ignore todo: probably error
+                    ? this.chunks[0].node.type !== 'Identifier' || this.scope.names.has(this.chunks[0].node.name)
+                    : true;
+        }
+    }
+
+    // TODO this should live in a specific binding
+    const read_only_media_attributes = new Set([
+        'duration',
+        'buffered',
+        'seekable',
+        'played',
+        'seeking',
+        'ended',
+        'videoHeight',
+        'videoWidth'
+    ]);
+    class Binding extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            if (info.expression.type !== 'Identifier' && info.expression.type !== 'MemberExpression') {
+                component.error(info, compiler_errors.invalid_directive_value);
+                return;
+            }
+            this.name = info.name;
+            this.expression = new Expression(component, this, scope, info.expression);
+            this.raw_expression = clone(info.expression);
+            const { name } = get_object(this.expression.node);
+            this.is_contextual = Array.from(this.expression.references).some(name => scope.names.has(name));
+            // make sure we track this as a mutable ref
+            if (scope.is_let(name)) {
+                component.error(this, compiler_errors.invalid_binding_let);
+                return;
+            }
+            else if (scope.names.has(name)) {
+                if (scope.is_await(name)) {
+                    component.error(this, compiler_errors.invalid_binding_await);
+                    return;
+                }
+                if (scope.is_const(name)) {
+                    component.error(this, compiler_errors.invalid_binding_const);
+                }
+                scope.dependencies_for_name.get(name).forEach(name => {
+                    const variable = component.var_lookup.get(name);
+                    if (variable) {
+                        variable.mutated = true;
+                    }
+                });
+            }
+            else {
+                const variable = component.var_lookup.get(name);
+                if (!variable || variable.global) {
+                    component.error(this.expression.node, compiler_errors.binding_undeclared(name));
+                    return;
+                }
+                variable[this.expression.node.type === 'MemberExpression' ? 'mutated' : 'reassigned'] = true;
+                if (info.expression.type === 'Identifier' && !variable.writable) {
+                    component.error(this.expression.node, compiler_errors.invalid_binding_writibale);
+                    return;
+                }
+            }
+            const type = parent.get_static_attribute_value('type');
+            this.is_readonly =
+                dimensions.test(this.name) ||
+                    (isElement(parent) &&
+                        ((parent.is_media_node() && read_only_media_attributes.has(this.name)) ||
+                            (parent.name === 'input' && type === 'file')) /* TODO others? */);
+        }
+        is_readonly_media_attribute() {
+            return read_only_media_attributes.has(this.name);
+        }
+    }
+    function isElement(node) {
+        return !!node.is_media_node;
+    }
+
+    class Transition extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            component.warn_if_undefined(info.name, info, scope);
+            this.name = info.name;
+            component.add_reference(this, info.name.split('.')[0]);
+            this.directive = info.intro && info.outro ? 'transition' : info.intro ? 'in' : 'out';
+            this.is_local = info.modifiers.includes('local');
+            if ((info.intro && parent.intro) || (info.outro && parent.outro)) {
+                const parent_transition = (parent.intro || parent.outro);
+                component.error(info, compiler_errors.duplicate_transition(this.directive, parent_transition.directive));
+                return;
+            }
+            this.expression = info.expression
+                ? new Expression(component, this, scope, info.expression)
+                : null;
+        }
+    }
+
+    class Animation extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            component.warn_if_undefined(info.name, info, scope);
+            this.name = info.name;
+            component.add_reference(this, info.name.split('.')[0]);
+            if (parent.animation) {
+                component.error(this, compiler_errors.duplicate_animation);
+                return;
+            }
+            const block = parent.parent;
+            if (!block || block.type !== 'EachBlock') {
+                // TODO can we relax the 'immediate child' rule?
+                component.error(this, compiler_errors.invalid_animation_immediate);
+                return;
+            }
+            if (!block.key) {
+                component.error(this, compiler_errors.invalid_animation_key);
+                return;
+            }
+            block.has_animation = true;
+            this.expression = info.expression
+                ? new Expression(component, this, scope, info.expression, true)
+                : null;
+        }
+    }
+
+    class Class extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.name = info.name;
+            this.expression = info.expression
+                ? new Expression(component, this, scope, info.expression)
+                : null;
+        }
+    }
+
+    /**
+     * Transforms a list of Text and MustacheTags into a TemplateLiteral expression.
+     * Start/End positions on the elements of the expression are not set.
+     */
+    function nodes_to_template_literal(value) {
+        const literal = {
+            type: 'TemplateLiteral',
+            expressions: [],
+            quasis: []
+        };
+        let quasi = {
+            type: 'TemplateElement',
+            value: { raw: '', cooked: null },
+            tail: false
+        };
+        value.forEach((node) => {
+            if (node.type === 'Text') {
+                quasi.value.raw += node.raw;
+            }
+            else if (node.type === 'MustacheTag') {
+                literal.quasis.push(quasi);
+                literal.expressions.push(node.expression);
+                quasi = {
+                    type: 'TemplateElement',
+                    value: { raw: '', cooked: null },
+                    tail: false
+                };
+            }
+        });
+        quasi.tail = true;
+        literal.quasis.push(quasi);
+        return literal;
+    }
+
+    class StyleDirective extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.name = info.name;
+            // Convert the value array to an expression so it's easier to handle
+            // the StyleDirective going forward.
+            if (info.value === true || (info.value.length === 1 && info.value[0].type === 'MustacheTag')) {
+                const identifier = info.value === true
+                    ? {
+                        type: 'Identifier',
+                        start: info.end - info.name.length,
+                        end: info.end,
+                        name: info.name
+                    }
+                    : info.value[0].expression;
+                this.expression = new Expression(component, this, scope, identifier);
+                this.should_cache = false;
+            }
+            else {
+                const raw_expression = nodes_to_template_literal(info.value);
+                this.expression = new Expression(component, this, scope, raw_expression);
+                this.should_cache = raw_expression.expressions.length > 0;
+            }
+        }
+    }
+
+    // Whitespace inside one of these elements will not result in
+    // a whitespace node being created in any circumstances. (This
+    // list is almost certainly very incomplete)
+    const elements_without_text = new Set([
+        'audio',
+        'datalist',
+        'dl',
+        'optgroup',
+        'select',
+        'video'
+    ]);
+    class Text extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.data = info.data;
+            this.synthetic = info.synthetic || false;
+        }
+        should_skip() {
+            if (/\S/.test(this.data))
+                return false;
+            const parent_element = this.find_nearest(/(?:Element|InlineComponent|SlotTemplate|Head)/);
+            if (!parent_element)
+                return false;
+            if (parent_element.type === 'Head')
+                return true;
+            if (parent_element.type === 'InlineComponent')
+                return parent_element.children.length === 1 && this === parent_element.children[0];
+            // svg namespace exclusions
+            if (/svg$/.test(parent_element.namespace)) {
+                if (this.prev && this.prev.type === 'Element' && this.prev.name === 'tspan')
+                    return false;
+            }
+            return parent_element.namespace || elements_without_text.has(parent_element.name);
+        }
+        keep_space() {
+            if (this.component.component_options.preserveWhitespace)
+                return true;
+            return this.within_pre();
+        }
+        within_pre() {
+            let node = this.parent;
+            while (node) {
+                if (node.type === 'Element' && node.name === 'pre') {
+                    return true;
+                }
+                node = node.parent;
+            }
+            return false;
+        }
+    }
+
+    // The `foreign` namespace covers all DOM implementations that aren't HTML5.
+    // It opts out of HTML5-specific a11y checks and case-insensitive attribute names.
+    const foreign = 'https://svelte.dev/docs#template-syntax-svelte-options';
+    const html = 'http://www.w3.org/1999/xhtml';
+    const mathml = 'http://www.w3.org/1998/Math/MathML';
+    const svg = 'http://www.w3.org/2000/svg';
+    const xlink = 'http://www.w3.org/1999/xlink';
+    const xml = 'http://www.w3.org/XML/1998/namespace';
+    const xmlns = 'http://www.w3.org/2000/xmlns';
+    const valid_namespaces = [
+        'foreign',
+        'html',
+        'mathml',
+        'svg',
+        'xlink',
+        'xml',
+        'xmlns',
+        foreign,
+        html,
+        mathml,
+        svg,
+        xlink,
+        xml,
+        xmlns
+    ];
+    const namespaces = { foreign, html, mathml, svg, xlink, xml, xmlns };
+
+    const applicable = new Set(['Identifier', 'ObjectExpression', 'ArrayExpression', 'Property']);
+    class Let extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.names = [];
+            this.name = { type: 'Identifier', name: info.name };
+            const { names } = this;
+            if (info.expression) {
+                this.value = info.expression;
+                walk(info.expression, {
+                    enter(node) {
+                        if (!applicable.has(node.type)) {
+                            return component.error(node, compiler_errors.invalid_let);
+                        }
+                        if (node.type === 'Identifier') {
+                            names.push(node.name);
+                        }
+                        // slightly unfortunate hack
+                        if (node.type === 'ArrayExpression') {
+                            node.type = 'ArrayPattern';
+                        }
+                        if (node.type === 'ObjectExpression') {
+                            node.type = 'ObjectPattern';
+                        }
+                    }
+                });
+            }
+            else {
+                names.push(this.name.name);
+            }
+        }
+    }
+
+    const svg$1 = /^(?:altGlyph|altGlyphDef|altGlyphItem|animate|animateColor|animateMotion|animateTransform|circle|clipPath|color-profile|cursor|defs|desc|discard|ellipse|feBlend|feColorMatrix|feComponentTransfer|feComposite|feConvolveMatrix|feDiffuseLighting|feDisplacementMap|feDistantLight|feDropShadow|feFlood|feFuncA|feFuncB|feFuncG|feFuncR|feGaussianBlur|feImage|feMerge|feMergeNode|feMorphology|feOffset|fePointLight|feSpecularLighting|feSpotLight|feTile|feTurbulence|filter|font|font-face|font-face-format|font-face-name|font-face-src|font-face-uri|foreignObject|g|glyph|glyphRef|hatch|hatchpath|hkern|image|line|linearGradient|marker|mask|mesh|meshgradient|meshpatch|meshrow|metadata|missing-glyph|mpath|path|pattern|polygon|polyline|radialGradient|rect|set|solidcolor|stop|svg|switch|symbol|text|textPath|tref|tspan|unknown|use|view|vkern)$/;
+    const aria_attributes = 'activedescendant atomic autocomplete busy checked colcount colindex colspan controls current describedby description details disabled dropeffect errormessage expanded flowto grabbed haspopup hidden invalid keyshortcuts label labelledby level live modal multiline multiselectable orientation owns placeholder posinset pressed readonly relevant required roledescription rowcount rowindex rowspan selected setsize sort valuemax valuemin valuenow valuetext'.split(' ');
+    const aria_attribute_set = new Set(aria_attributes);
+    const aria_roles = 'alert alertdialog application article banner blockquote button caption cell checkbox code columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form generic graphics-document graphics-object graphics-symbol grid gridcell group heading img link list listbox listitem log main marquee math meter menu menubar menuitem menuitemcheckbox menuitemradio navigation none note option paragraph presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip tree treegrid treeitem'.split(' ');
+    const aria_role_set = new Set(aria_roles);
+    const a11y_required_attributes = {
+        a: ['href'],
+        area: ['alt', 'aria-label', 'aria-labelledby'],
+        // html-has-lang
+        html: ['lang'],
+        // iframe-has-title
+        iframe: ['title'],
+        img: ['alt'],
+        object: ['title', 'aria-label', 'aria-labelledby']
+    };
+    const a11y_distracting_elements = new Set([
+        'blink',
+        'marquee'
+    ]);
+    const a11y_required_content = new Set([
+        // anchor-has-content
+        'a',
+        // heading-has-content
+        'h1',
+        'h2',
+        'h3',
+        'h4',
+        'h5',
+        'h6'
+    ]);
+    const a11y_labelable = new Set([
+        'button',
+        'input',
+        'keygen',
+        'meter',
+        'output',
+        'progress',
+        'select',
+        'textarea'
+    ]);
+    const a11y_nested_implicit_semantics = new Map([
+        ['header', 'banner'],
+        ['footer', 'contentinfo']
+    ]);
+    const a11y_implicit_semantics = new Map([
+        ['a', 'link'],
+        ['aside', 'complementary'],
+        ['body', 'document'],
+        ['datalist', 'listbox'],
+        ['dd', 'definition'],
+        ['dfn', 'term'],
+        ['details', 'group'],
+        ['dt', 'term'],
+        ['fieldset', 'group'],
+        ['form', 'form'],
+        ['h1', 'heading'],
+        ['h2', 'heading'],
+        ['h3', 'heading'],
+        ['h4', 'heading'],
+        ['h5', 'heading'],
+        ['h6', 'heading'],
+        ['hr', 'separator'],
+        ['li', 'listitem'],
+        ['menu', 'list'],
+        ['nav', 'navigation'],
+        ['ol', 'list'],
+        ['optgroup', 'group'],
+        ['output', 'status'],
+        ['progress', 'progressbar'],
+        ['section', 'region'],
+        ['summary', 'button'],
+        ['tbody', 'rowgroup'],
+        ['textarea', 'textbox'],
+        ['tfoot', 'rowgroup'],
+        ['thead', 'rowgroup'],
+        ['tr', 'row'],
+        ['ul', 'list']
+    ]);
+    const invisible_elements = new Set(['meta', 'html', 'script', 'style']);
+    const valid_modifiers = new Set([
+        'preventDefault',
+        'stopPropagation',
+        'capture',
+        'once',
+        'passive',
+        'nonpassive',
+        'self',
+        'trusted'
+    ]);
+    const passive_events = new Set([
+        'wheel',
+        'touchstart',
+        'touchmove',
+        'touchend',
+        'touchcancel'
+    ]);
+    const react_attributes = new Map([
+        ['className', 'class'],
+        ['htmlFor', 'for']
+    ]);
+    const attributes_to_compact_whitespace = ['class', 'style'];
+    function is_parent(parent, elements) {
+        let check = false;
+        while (parent) {
+            const parent_name = parent.name;
+            if (elements.includes(parent_name)) {
+                check = true;
+                break;
+            }
+            if (parent.type === 'Element') {
+                break;
+            }
+            parent = parent.parent;
+        }
+        return check;
+    }
+    function get_namespace(parent, element, explicit_namespace) {
+        const parent_element = parent.find_nearest(/^Element/);
+        if (!parent_element) {
+            return explicit_namespace || (svg$1.test(element.name)
+                ? namespaces.svg
+                : null);
+        }
+        if (parent_element.namespace !== namespaces.foreign) {
+            if (svg$1.test(element.name.toLowerCase()))
+                return namespaces.svg;
+            if (parent_element.name.toLowerCase() === 'foreignobject')
+                return null;
+        }
+        return parent_element.namespace;
+    }
+    class Element extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.attributes = [];
+            this.actions = [];
+            this.bindings = [];
+            this.classes = [];
+            this.styles = [];
+            this.handlers = [];
+            this.lets = [];
+            this.intro = null;
+            this.outro = null;
+            this.animation = null;
+            this.name = info.name;
+            if (info.name === 'svelte:element') {
+                if (typeof info.tag !== 'string') {
+                    this.tag_expr = new Expression(component, this, scope, info.tag);
+                }
+                else {
+                    this.tag_expr = new Expression(component, this, scope, string_literal(info.tag));
+                }
+            }
+            else {
+                this.tag_expr = new Expression(component, this, scope, string_literal(this.name));
+            }
+            this.namespace = get_namespace(parent, this, component.namespace);
+            if (this.namespace !== namespaces.foreign) {
+                if (this.name === 'pre' || this.name === 'textarea') {
+                    const first = info.children[0];
+                    if (first && first.type === 'Text') {
+                        // The leading newline character needs to be stripped because of a qirk,
+                        // it is ignored by browsers if the tag and its contents are set through
+                        // innerHTML (NOT if set through the innerHTML of the tag or dynamically).
+                        // Therefore strip it here but add it back in the appropriate
+                        // places if there's another newline afterwards.
+                        // see https://html.spec.whatwg.org/multipage/syntax.html#element-restrictions
+                        // see https://html.spec.whatwg.org/multipage/grouping-content.html#the-pre-element
+                        first.data = first.data.replace(start_newline, '');
+                    }
+                }
+                if (this.name === 'textarea') {
+                    if (info.children.length > 0) {
+                        const value_attribute = info.attributes.find(node => node.name === 'value');
+                        if (value_attribute) {
+                            component.error(value_attribute, compiler_errors.textarea_duplicate_value);
+                            return;
+                        }
+                        // this is an egregious hack, but it's the easiest way to get <textarea>
+                        // children treated the same way as a value attribute
+                        info.attributes.push({
+                            type: 'Attribute',
+                            name: 'value',
+                            value: info.children
+                        });
+                        info.children = [];
+                    }
+                }
+                if (this.name === 'option') {
+                    // Special case — treat these the same way:
+                    //   <option>{foo}</option>
+                    //   <option value={foo}>{foo}</option>
+                    const value_attribute = info.attributes.find(attribute => attribute.name === 'value');
+                    if (!value_attribute) {
+                        info.attributes.push({
+                            type: 'Attribute',
+                            name: 'value',
+                            value: info.children,
+                            synthetic: true
+                        });
+                    }
+                }
+            }
+            const has_let = info.attributes.some(node => node.type === 'Let');
+            if (has_let) {
+                scope = scope.child();
+            }
+            // Binding relies on Attribute, defer its evaluation
+            const order = ['Binding']; // everything else is -1
+            info.attributes.sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type));
+            info.attributes.forEach(node => {
+                switch (node.type) {
+                    case 'Action':
+                        this.actions.push(new Action(component, this, scope, node));
+                        break;
+                    case 'Attribute':
+                    case 'Spread':
+                        // special case
+                        if (node.name === 'xmlns')
+                            this.namespace = node.value[0].data;
+                        this.attributes.push(new Attribute(component, this, scope, node));
+                        break;
+                    case 'Binding':
+                        this.bindings.push(new Binding(component, this, scope, node));
+                        break;
+                    case 'Class':
+                        this.classes.push(new Class(component, this, scope, node));
+                        break;
+                    case 'StyleDirective':
+                        this.styles.push(new StyleDirective(component, this, scope, node));
+                        break;
+                    case 'EventHandler':
+                        this.handlers.push(new EventHandler(component, this, scope, node));
+                        break;
+                    case 'Let': {
+                        const l = new Let(component, this, scope, node);
+                        this.lets.push(l);
+                        const dependencies = new Set([l.name.name]);
+                        l.names.forEach(name => {
+                            scope.add(name, dependencies, this);
+                        });
+                        break;
+                    }
+                    case 'Transition':
+                        {
+                            const transition = new Transition(component, this, scope, node);
+                            if (node.intro)
+                                this.intro = transition;
+                            if (node.outro)
+                                this.outro = transition;
+                            break;
+                        }
+                    case 'Animation':
+                        this.animation = new Animation(component, this, scope, node);
+                        break;
+                    default:
+                        throw new Error(`Not implemented: ${node.type}`);
+                }
+            });
+            this.scope = scope;
+            this.children = map_children(component, this, this.scope, info.children);
+            this.validate();
+            this.optimise();
+            component.apply_stylesheet(this);
+        }
+        get is_dynamic_element() {
+            return this.name === 'svelte:element';
+        }
+        validate() {
+            if (this.component.var_lookup.has(this.name) && this.component.var_lookup.get(this.name).imported) {
+                this.component.warn(this, compiler_warnings.component_name_lowercase(this.name));
+            }
+            this.validate_attributes();
+            this.validate_event_handlers();
+            if (this.namespace === namespaces.foreign) {
+                this.validate_bindings_foreign();
+            }
+            else {
+                this.validate_attributes_a11y();
+                this.validate_special_cases();
+                this.validate_bindings();
+                this.validate_content();
+            }
+        }
+        validate_attributes() {
+            const { component, parent } = this;
+            this.attributes.forEach(attribute => {
+                if (attribute.is_spread)
+                    return;
+                const name = attribute.name.toLowerCase();
+                // Errors
+                if (/(^[0-9-.])|[\^$@%&#?!|()[\]{}^*+~;]/.test(name)) {
+                    return component.error(attribute, compiler_errors.illegal_attribute(name));
+                }
+                if (name === 'slot') {
+                    if (!attribute.is_static) {
+                        return component.error(attribute, compiler_errors.invalid_slot_attribute);
+                    }
+                    if (component.slot_outlets.has(name)) {
+                        return component.error(attribute, compiler_errors.duplicate_slot_attribute(name));
+                        // this code was unreachable. Still needed?
+                        // component.slot_outlets.add(name);
+                    }
+                    if (!(parent.type === 'SlotTemplate' || within_custom_element(parent))) {
+                        return component.error(attribute, compiler_errors.invalid_slotted_content);
+                    }
+                }
+                // Warnings
+                if (this.namespace !== namespaces.foreign) {
+                    if (name === 'is') {
+                        component.warn(attribute, compiler_warnings.avoid_is);
+                    }
+                    if (react_attributes.has(attribute.name)) {
+                        component.warn(attribute, compiler_warnings.invalid_html_attribute(attribute.name, react_attributes.get(attribute.name)));
+                    }
+                }
+            });
+        }
+        validate_attributes_a11y() {
+            const { component } = this;
+            this.attributes.forEach(attribute => {
+                if (attribute.is_spread)
+                    return;
+                const name = attribute.name.toLowerCase();
+                // aria-props
+                if (name.startsWith('aria-')) {
+                    if (invisible_elements.has(this.name)) {
+                        // aria-unsupported-elements
+                        component.warn(attribute, compiler_warnings.a11y_aria_attributes(this.name));
+                    }
+                    const type = name.slice(5);
+                    if (!aria_attribute_set.has(type)) {
+                        const match = fuzzymatch(type, aria_attributes);
+                        component.warn(attribute, compiler_warnings.a11y_unknown_aria_attribute(type, match));
+                    }
+                    if (name === 'aria-hidden' && /^h[1-6]$/.test(this.name)) {
+                        component.warn(attribute, compiler_warnings.a11y_hidden(this.name));
+                    }
+                }
+                // aria-role
+                if (name === 'role') {
+                    if (invisible_elements.has(this.name)) {
+                        // aria-unsupported-elements
+                        component.warn(attribute, compiler_warnings.a11y_misplaced_role(this.name));
+                    }
+                    const value = attribute.get_static_value();
+                    // @ts-ignore
+                    if (value && !aria_role_set.has(value)) {
+                        // @ts-ignore
+                        const match = fuzzymatch(value, aria_roles);
+                        component.warn(attribute, compiler_warnings.a11y_unknown_role(value, match));
+                    }
+                    // no-redundant-roles
+                    const has_redundant_role = value === a11y_implicit_semantics.get(this.name);
+                    if (this.name === value || has_redundant_role) {
+                        component.warn(attribute, compiler_warnings.a11y_no_redundant_roles(value));
+                    }
+                    // Footers and headers are special cases, and should not have redundant roles unless they are the children of sections or articles.
+                    const is_parent_section_or_article = is_parent(this.parent, ['section', 'article']);
+                    if (!is_parent_section_or_article) {
+                        const has_nested_redundant_role = value === a11y_nested_implicit_semantics.get(this.name);
+                        if (has_nested_redundant_role) {
+                            component.warn(attribute, compiler_warnings.a11y_no_redundant_roles(value));
+                        }
+                    }
+                }
+                // no-access-key
+                if (name === 'accesskey') {
+                    component.warn(attribute, compiler_warnings.a11y_accesskey);
+                }
+                // no-autofocus
+                if (name === 'autofocus') {
+                    component.warn(attribute, compiler_warnings.a11y_autofocus);
+                }
+                // scope
+                if (name === 'scope' && this.name !== 'th') {
+                    component.warn(attribute, compiler_warnings.a11y_misplaced_scope);
+                }
+                // tabindex-no-positive
+                if (name === 'tabindex') {
+                    const value = attribute.get_static_value();
+                    // @ts-ignore todo is tabindex=true correct case?
+                    if (!isNaN(value) && +value > 0) {
+                        component.warn(attribute, compiler_warnings.a11y_positive_tabindex);
+                    }
+                }
+            });
+        }
+        validate_special_cases() {
+            const { component, attributes, handlers } = this;
+            const attribute_map = new Map();
+            const handlers_map = new Map();
+            attributes.forEach(attribute => (attribute_map.set(attribute.name, attribute)));
+            handlers.forEach(handler => (handlers_map.set(handler.name, handler)));
+            if (this.name === 'a') {
+                const href_attribute = attribute_map.get('href') || attribute_map.get('xlink:href');
+                const id_attribute = attribute_map.get('id');
+                const name_attribute = attribute_map.get('name');
+                if (href_attribute) {
+                    const href_value = href_attribute.get_static_value();
+                    if (href_value === '' || href_value === '#' || /^\W*javascript:/i.test(href_value)) {
+                        component.warn(href_attribute, compiler_warnings.a11y_invalid_attribute(href_attribute.name, href_value));
+                    }
+                }
+                else {
+                    const id_attribute_valid = id_attribute && id_attribute.get_static_value() !== '';
+                    const name_attribute_valid = name_attribute && name_attribute.get_static_value() !== '';
+                    if (!id_attribute_valid && !name_attribute_valid) {
+                        component.warn(this, compiler_warnings.a11y_missing_attribute('a', 'an', 'href'));
+                    }
+                }
+            }
+            else {
+                const required_attributes = a11y_required_attributes[this.name];
+                if (required_attributes) {
+                    const has_attribute = required_attributes.some(name => attribute_map.has(name));
+                    if (!has_attribute) {
+                        should_have_attribute(this, required_attributes);
+                    }
+                }
+            }
+            if (this.name === 'input') {
+                const type = attribute_map.get('type');
+                if (type && type.get_static_value() === 'image') {
+                    const required_attributes = ['alt', 'aria-label', 'aria-labelledby'];
+                    const has_attribute = required_attributes.some(name => attribute_map.has(name));
+                    if (!has_attribute) {
+                        should_have_attribute(this, required_attributes, 'input type="image"');
+                    }
+                }
+            }
+            if (this.name === 'img') {
+                const alt_attribute = attribute_map.get('alt');
+                const aria_hidden_attribute = attribute_map.get('aria-hidden');
+                const aria_hidden_exist = aria_hidden_attribute && aria_hidden_attribute.get_static_value();
+                if (alt_attribute && !aria_hidden_exist) {
+                    const alt_value = alt_attribute.get_static_value();
+                    if (/\b(image|picture|photo)\b/i.test(alt_value)) {
+                        component.warn(this, compiler_warnings.a11y_img_redundant_alt);
+                    }
+                }
+            }
+            if (this.name === 'label') {
+                const has_input_child = this.children.some(i => (i instanceof Element && a11y_labelable.has(i.name)));
+                if (!attribute_map.has('for') && !has_input_child) {
+                    component.warn(this, compiler_warnings.a11y_label_has_associated_control);
+                }
+            }
+            if (this.name === 'video') {
+                if (attribute_map.has('muted')) {
+                    return;
+                }
+                let has_caption;
+                const track = this.children.find((i) => i.name === 'track');
+                if (track) {
+                    has_caption = track.attributes.find(a => a.name === 'kind' && a.get_static_value() === 'captions');
+                }
+                if (!has_caption) {
+                    component.warn(this, compiler_warnings.a11y_media_has_caption);
+                }
+            }
+            if (a11y_distracting_elements.has(this.name)) {
+                // no-distracting-elements
+                component.warn(this, compiler_warnings.a11y_distracting_elements(this.name));
+            }
+            if (this.name === 'figcaption') {
+                let { parent } = this;
+                let is_figure_parent = false;
+                while (parent) {
+                    if (parent.name === 'figure') {
+                        is_figure_parent = true;
+                        break;
+                    }
+                    if (parent.type === 'Element') {
+                        break;
+                    }
+                    parent = parent.parent;
+                }
+                if (!is_figure_parent) {
+                    component.warn(this, compiler_warnings.a11y_structure_immediate);
+                }
+            }
+            if (this.name === 'figure') {
+                const children = this.children.filter(node => {
+                    if (node.type === 'Comment')
+                        return false;
+                    if (node.type === 'Text')
+                        return /\S/.test(node.data);
+                    return true;
+                });
+                const index = children.findIndex(child => child.name === 'figcaption');
+                if (index !== -1 && (index !== 0 && index !== children.length - 1)) {
+                    component.warn(children[index], compiler_warnings.a11y_structure_first_or_last);
+                }
+            }
+            if (handlers_map.has('mouseover') && !handlers_map.has('focus')) {
+                component.warn(this, compiler_warnings.a11y_mouse_events_have_key_events('mouseover', 'focus'));
+            }
+            if (handlers_map.has('mouseout') && !handlers_map.has('blur')) {
+                component.warn(this, compiler_warnings.a11y_mouse_events_have_key_events('mouseout', 'blur'));
+            }
+        }
+        validate_bindings_foreign() {
+            this.bindings.forEach(binding => {
+                if (binding.name !== 'this') {
+                    return this.component.error(binding, compiler_errors.invalid_binding_foreign(binding.name));
+                }
+            });
+        }
+        validate_bindings() {
+            const { component } = this;
+            const check_type_attribute = () => {
+                const attribute = this.attributes.find((attribute) => attribute.name === 'type');
+                if (!attribute)
+                    return null;
+                if (!attribute.is_static) {
+                    return component.error(attribute, compiler_errors.invalid_type);
+                }
+                const value = attribute.get_static_value();
+                if (value === true) {
+                    return component.error(attribute, compiler_errors.missing_type);
+                }
+                return value;
+            };
+            this.bindings.forEach(binding => {
+                const { name } = binding;
+                if (name === 'value') {
+                    if (this.name !== 'input' &&
+                        this.name !== 'textarea' &&
+                        this.name !== 'select') {
+                        return component.error(binding, compiler_errors.invalid_binding_elements(this.name, 'value'));
+                    }
+                    if (this.name === 'select') {
+                        const attribute = this.attributes.find((attribute) => attribute.name === 'multiple');
+                        if (attribute && !attribute.is_static) {
+                            return component.error(attribute, compiler_errors.dynamic_multiple_attribute);
+                        }
+                    }
+                    else {
+                        check_type_attribute();
+                    }
+                }
+                else if (name === 'checked' || name === 'indeterminate') {
+                    if (this.name !== 'input') {
+                        return component.error(binding, compiler_errors.invalid_binding_elements(this.name, name));
+                    }
+                    const type = check_type_attribute();
+                    if (type !== 'checkbox') {
+                        return component.error(binding, compiler_errors.invalid_binding_no_checkbox(name, type === 'radio'));
+                    }
+                }
+                else if (name === 'group') {
+                    if (this.name !== 'input') {
+                        return component.error(binding, compiler_errors.invalid_binding_elements(this.name, 'group'));
+                    }
+                    const type = check_type_attribute();
+                    if (type !== 'checkbox' && type !== 'radio') {
+                        return component.error(binding, compiler_errors.invalid_binding_element_with('<input type="checkbox"> or <input type="radio">', 'group'));
+                    }
+                }
+                else if (name === 'files') {
+                    if (this.name !== 'input') {
+                        return component.error(binding, compiler_errors.invalid_binding_elements(this.name, 'files'));
+                    }
+                    const type = check_type_attribute();
+                    if (type !== 'file') {
+                        return component.error(binding, compiler_errors.invalid_binding_element_with('<input type="file">', 'files'));
+                    }
+                }
+                else if (name === 'open') {
+                    if (this.name !== 'details') {
+                        return component.error(binding, compiler_errors.invalid_binding_element_with('<details>', name));
+                    }
+                }
+                else if (name === 'currentTime' ||
+                    name === 'duration' ||
+                    name === 'paused' ||
+                    name === 'buffered' ||
+                    name === 'seekable' ||
+                    name === 'played' ||
+                    name === 'volume' ||
+                    name === 'muted' ||
+                    name === 'playbackRate' ||
+                    name === 'seeking' ||
+                    name === 'ended') {
+                    if (this.name !== 'audio' && this.name !== 'video') {
+                        return component.error(binding, compiler_errors.invalid_binding_element_with('audio> or <video>', name));
+                    }
+                }
+                else if (name === 'videoHeight' ||
+                    name === 'videoWidth') {
+                    if (this.name !== 'video') {
+                        return component.error(binding, compiler_errors.invalid_binding_element_with('<video>', name));
+                    }
+                }
+                else if (dimensions.test(name)) {
+                    if (this.name === 'svg' && (name === 'offsetWidth' || name === 'offsetHeight')) {
+                        return component.error(binding, compiler_errors.invalid_binding_on(binding.name, `<svg>. Use '${name.replace('offset', 'client')}' instead`));
+                    }
+                    else if (svg$1.test(this.name)) {
+                        return component.error(binding, compiler_errors.invalid_binding_on(binding.name, 'SVG elements'));
+                    }
+                    else if (is_void(this.name)) {
+                        return component.error(binding, compiler_errors.invalid_binding_on(binding.name, `void elements like <${this.name}>. Use a wrapper element instead`));
+                    }
+                }
+                else if (name === 'textContent' ||
+                    name === 'innerHTML') {
+                    const contenteditable = this.attributes.find((attribute) => attribute.name === 'contenteditable');
+                    if (!contenteditable) {
+                        return component.error(binding, compiler_errors.missing_contenteditable_attribute);
+                    }
+                    else if (contenteditable && !contenteditable.is_static) {
+                        return component.error(contenteditable, compiler_errors.dynamic_contenteditable_attribute);
+                    }
+                }
+                else if (name !== 'this') {
+                    return component.error(binding, compiler_errors.invalid_binding(binding.name));
+                }
+            });
+        }
+        validate_content() {
+            if (!a11y_required_content.has(this.name))
+                return;
+            if (this.bindings
+                .some((binding) => ['textContent', 'innerHTML'].includes(binding.name)))
+                return;
+            if (this.children.length === 0) {
+                this.component.warn(this, compiler_warnings.a11y_missing_content(this.name));
+            }
+        }
+        validate_event_handlers() {
+            const { component } = this;
+            this.handlers.forEach(handler => {
+                if (handler.modifiers.has('passive') && handler.modifiers.has('preventDefault')) {
+                    return component.error(handler, compiler_errors.invalid_event_modifier_combination('passive', 'preventDefault'));
+                }
+                if (handler.modifiers.has('passive') && handler.modifiers.has('nonpassive')) {
+                    return component.error(handler, compiler_errors.invalid_event_modifier_combination('passive', 'nonpassive'));
+                }
+                handler.modifiers.forEach(modifier => {
+                    if (!valid_modifiers.has(modifier)) {
+                        return component.error(handler, compiler_errors.invalid_event_modifier(list(Array.from(valid_modifiers))));
+                    }
+                    if (modifier === 'passive') {
+                        if (passive_events.has(handler.name)) {
+                            if (handler.can_make_passive) {
+                                component.warn(handler, compiler_warnings.redundant_event_modifier_for_touch);
+                            }
+                        }
+                        else {
+                            component.warn(handler, compiler_warnings.redundant_event_modifier_passive);
+                        }
+                    }
+                    if (component.compile_options.legacy && (modifier === 'once' || modifier === 'passive')) {
+                        // TODO this could be supported, but it would need a few changes to
+                        // how event listeners work
+                        return component.error(handler, compiler_errors.invalid_event_modifier_legacy(modifier));
+                    }
+                });
+                if (passive_events.has(handler.name) && handler.can_make_passive && !handler.modifiers.has('preventDefault') && !handler.modifiers.has('nonpassive')) {
+                    // touch/wheel events should be passive by default
+                    handler.modifiers.add('passive');
+                }
+            });
+        }
+        is_media_node() {
+            return this.name === 'audio' || this.name === 'video';
+        }
+        add_css_class() {
+            if (this.attributes.some(attr => attr.is_spread)) {
+                this.needs_manual_style_scoping = true;
+                return;
+            }
+            const { id } = this.component.stylesheet;
+            const class_attribute = this.attributes.find(a => a.name === 'class');
+            if (class_attribute && !class_attribute.is_true) {
+                if (class_attribute.chunks.length === 1 && class_attribute.chunks[0].type === 'Text') {
+                    class_attribute.chunks[0].data += ` ${id}`;
+                }
+                else {
+                    class_attribute.chunks.push(new Text(this.component, this, this.scope, {
+                        type: 'Text',
+                        data: ` ${id}`,
+                        synthetic: true
+                    }));
+                }
+            }
+            else {
+                this.attributes.push(new Attribute(this.component, this, this.scope, {
+                    type: 'Attribute',
+                    name: 'class',
+                    value: [{ type: 'Text', data: id, synthetic: true }]
+                }));
+            }
+        }
+        get slot_template_name() {
+            return this.attributes.find(attribute => attribute.name === 'slot').get_static_value();
+        }
+        optimise() {
+            attributes_to_compact_whitespace.forEach(attribute_name => {
+                const attribute = this.attributes.find(a => a.name === attribute_name);
+                if (attribute && !attribute.is_true) {
+                    attribute.chunks.forEach((chunk, index) => {
+                        if (chunk.type === 'Text') {
+                            let data = chunk.data.replace(/[\s\n\t]+/g, ' ');
+                            if (index === 0) {
+                                data = data.trimLeft();
+                            }
+                            else if (index === attribute.chunks.length - 1) {
+                                data = data.trimRight();
+                            }
+                            chunk.data = data;
+                        }
+                    });
+                }
+            });
+        }
+    }
+    function should_have_attribute(node, attributes, name = node.name) {
+        const article = /^[aeiou]/.test(attributes[0]) ? 'an' : 'a';
+        const sequence = attributes.length > 1 ?
+            attributes.slice(0, -1).join(', ') + ` or ${attributes[attributes.length - 1]}` :
+            attributes[0];
+        node.component.warn(node, compiler_warnings.a11y_missing_attribute(name, article, sequence));
+    }
+    function within_custom_element(parent) {
+        while (parent) {
+            if (parent.type === 'InlineComponent')
+                return false;
+            if (parent.type === 'Element' && /-/.test(parent.name))
+                return true;
+            parent = parent.parent;
+        }
+        return false;
+    }
+
+    // https://github.com/darkskyapp/string-hash/blob/master/index.js
+    function hash(str) {
+        str = str.replace(/\r/g, '');
+        let hash = 5381;
+        let i = str.length;
+        while (i--)
+            hash = ((hash << 5) - hash) ^ str.charCodeAt(i);
+        return (hash >>> 0).toString(36);
+    }
+
+    class Head extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            if (info.attributes.length) {
+                component.error(info.attributes[0], compiler_errors.invalid_attribute_head);
+                return;
+            }
+            this.children = map_children(component, parent, scope, info.children.filter(child => {
+                return (child.type !== 'Text' || /\S/.test(child.data));
+            }));
+            if (this.children.length > 0) {
+                this.id = `svelte-${hash(this.component.source.slice(this.start, this.end))}`;
+            }
+        }
+    }
+
+    class IfBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.scope = scope.child();
+            this.expression = new Expression(component, this, this.scope, info.expression);
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, this));
+            this.else = info.else
+                ? new ElseBlock(component, this, scope, info.else)
+                : null;
+            this.warn_if_empty_block();
+        }
+    }
+
+    class InlineComponent extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.attributes = [];
+            this.bindings = [];
+            this.handlers = [];
+            this.lets = [];
+            this.css_custom_properties = [];
+            if (info.name !== 'svelte:component' && info.name !== 'svelte:self') {
+                const name = info.name.split('.')[0]; // accommodate namespaces
+                component.warn_if_undefined(name, info, scope);
+                component.add_reference(this, name);
+            }
+            this.name = info.name;
+            this.expression = this.name === 'svelte:component'
+                ? new Expression(component, this, scope, info.expression)
+                : null;
+            info.attributes.forEach(node => {
+                /* eslint-disable no-fallthrough */
+                switch (node.type) {
+                    case 'Action':
+                        return component.error(node, compiler_errors.invalid_action);
+                    case 'Attribute':
+                        if (node.name.startsWith('--')) {
+                            this.css_custom_properties.push(new Attribute(component, this, scope, node));
+                            break;
+                        }
+                    // fallthrough
+                    case 'Spread':
+                        this.attributes.push(new Attribute(component, this, scope, node));
+                        break;
+                    case 'Binding':
+                        this.bindings.push(new Binding(component, this, scope, node));
+                        break;
+                    case 'Class':
+                        return component.error(node, compiler_errors.invalid_class);
+                    case 'EventHandler':
+                        this.handlers.push(new EventHandler(component, this, scope, node));
+                        break;
+                    case 'Let':
+                        this.lets.push(new Let(component, this, scope, node));
+                        break;
+                    case 'Transition':
+                        return component.error(node, compiler_errors.invalid_transition);
+                    case 'StyleDirective':
+                        return component.error(node, compiler_errors.invalid_component_style_directive);
+                    default:
+                        throw new Error(`Not implemented: ${node.type}`);
+                }
+                /* eslint-enable no-fallthrough */
+            });
+            if (this.lets.length > 0) {
+                this.scope = scope.child();
+                this.lets.forEach(l => {
+                    const dependencies = new Set([l.name.name]);
+                    l.names.forEach(name => {
+                        this.scope.add(name, dependencies, this);
+                    });
+                });
+            }
+            else {
+                this.scope = scope;
+            }
+            this.handlers.forEach(handler => {
+                handler.modifiers.forEach(modifier => {
+                    if (modifier !== 'once') {
+                        return component.error(handler, compiler_errors.invalid_event_modifier_component);
+                    }
+                });
+            });
+            const children = [];
+            for (let i = info.children.length - 1; i >= 0; i--) {
+                const child = info.children[i];
+                if (child.type === 'SlotTemplate') {
+                    children.push(child);
+                    info.children.splice(i, 1);
+                }
+                else if ((child.type === 'Element' || child.type === 'InlineComponent' || child.type === 'Slot') && child.attributes.find(attribute => attribute.name === 'slot')) {
+                    const slot_template = {
+                        start: child.start,
+                        end: child.end,
+                        type: 'SlotTemplate',
+                        name: 'svelte:fragment',
+                        attributes: [],
+                        children: [child]
+                    };
+                    // transfer attributes
+                    for (let i = child.attributes.length - 1; i >= 0; i--) {
+                        const attribute = child.attributes[i];
+                        if (attribute.type === 'Let') {
+                            slot_template.attributes.push(attribute);
+                            child.attributes.splice(i, 1);
+                        }
+                        else if (attribute.type === 'Attribute' && attribute.name === 'slot') {
+                            slot_template.attributes.push(attribute);
+                        }
+                    }
+                    // transfer const
+                    for (let i = child.children.length - 1; i >= 0; i--) {
+                        const child_child = child.children[i];
+                        if (child_child.type === 'ConstTag') {
+                            slot_template.children.push(child_child);
+                            child.children.splice(i, 1);
+                        }
+                    }
+                    children.push(slot_template);
+                    info.children.splice(i, 1);
+                }
+            }
+            if (info.children.some(node => not_whitespace_text(node))) {
+                children.push({
+                    start: info.start,
+                    end: info.end,
+                    type: 'SlotTemplate',
+                    name: 'svelte:fragment',
+                    attributes: [],
+                    children: info.children
+                });
+            }
+            this.children = map_children(component, this, this.scope, children);
+        }
+        get slot_template_name() {
+            return this.attributes.find(attribute => attribute.name === 'slot').get_static_value();
+        }
+    }
+    function not_whitespace_text(node) {
+        return !(node.type === 'Text' && /^\s+$/.test(node.data));
+    }
+
+    class KeyBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.expression = new Expression(component, this, scope, info.expression);
+            this.children = map_children(component, this, scope, info.children);
+            this.warn_if_empty_block();
+        }
+    }
+
+    class Tag extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.expression = new Expression(component, this, scope, info.expression);
+            this.should_cache = (info.expression.type !== 'Identifier' ||
+                (this.expression.dependencies.size && scope.names.has(info.expression.name)));
+        }
+    }
+
+    class MustacheTag extends Tag {
+    }
+
+    class Options extends Node$1 {
+    }
+
+    class RawMustacheTag extends Tag {
+    }
+
+    class DebugTag extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.expressions = info.identifiers.map((node) => {
+                return new Expression(component, parent, scope, node);
+            });
+        }
+    }
+
+    class Slot extends Element {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.values = new Map();
+            info.attributes.forEach(attr => {
+                if (attr.type !== 'Attribute' && attr.type !== 'Spread') {
+                    return component.error(attr, compiler_errors.invalid_slot_directive);
+                }
+                if (attr.name === 'name') {
+                    if (attr.value.length !== 1 || attr.value[0].type !== 'Text') {
+                        return component.error(attr, compiler_errors.dynamic_slot_name);
+                    }
+                    this.slot_name = attr.value[0].data;
+                    if (this.slot_name === 'default') {
+                        return component.error(attr, compiler_errors.invalid_slot_name);
+                    }
+                }
+                this.values.set(attr.name, new Attribute(component, this, scope, attr));
+            });
+            if (!this.slot_name)
+                this.slot_name = 'default';
+            if (this.slot_name === 'default') {
+                // if this is the default slot, add our dependencies to any
+                // other slots (which inherit our slot values) that were
+                // previously encountered
+                component.slots.forEach((slot) => {
+                    this.values.forEach((attribute, name) => {
+                        if (!slot.values.has(name)) {
+                            slot.values.set(name, attribute);
+                        }
+                    });
+                });
+            }
+            else if (component.slots.has('default')) {
+                // otherwise, go the other way — inherit values from
+                // a previously encountered default slot
+                const default_slot = component.slots.get('default');
+                default_slot.values.forEach((attribute, name) => {
+                    if (!this.values.has(name)) {
+                        this.values.set(name, attribute);
+                    }
+                });
+            }
+            component.slots.set(this.slot_name, this);
+        }
+    }
+
+    class SlotTemplate extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.lets = [];
+            this.slot_template_name = 'default';
+            this.validate_slot_template_placement();
+            scope = scope.child();
+            info.attributes.forEach((node) => {
+                switch (node.type) {
+                    case 'Let': {
+                        const l = new Let(component, this, scope, node);
+                        this.lets.push(l);
+                        const dependencies = new Set([l.name.name]);
+                        l.names.forEach((name) => {
+                            scope.add(name, dependencies, this);
+                        });
+                        break;
+                    }
+                    case 'Attribute': {
+                        if (node.name === 'slot') {
+                            this.slot_attribute = new Attribute(component, this, scope, node);
+                            if (!this.slot_attribute.is_static) {
+                                return component.error(node, compiler_errors.invalid_slot_attribute);
+                            }
+                            const value = this.slot_attribute.get_static_value();
+                            if (typeof value === 'boolean') {
+                                return component.error(node, compiler_errors.invalid_slot_attribute_value_missing);
+                            }
+                            this.slot_template_name = value;
+                            break;
+                        }
+                        throw new Error(`Invalid attribute '${node.name}' in <svelte:fragment>`);
+                    }
+                    default:
+                        throw new Error(`Not implemented: ${node.type}`);
+                }
+            });
+            this.scope = scope;
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, this));
+        }
+        validate_slot_template_placement() {
+            if (this.parent.type !== 'InlineComponent') {
+                return this.component.error(this, compiler_errors.invalid_slotted_content_fragment);
+            }
+        }
+    }
+
+    class Title extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.children = map_children(component, parent, scope, info.children);
+            if (info.attributes.length > 0) {
+                component.error(info.attributes[0], compiler_errors.illegal_attribute_title);
+                return;
+            }
+            info.children.forEach(child => {
+                if (child.type !== 'Text' && child.type !== 'MustacheTag') {
+                    return component.error(child, compiler_errors.illegal_structure_title);
+                }
+            });
+            this.should_cache = info.children.length === 1
+                ? (info.children[0].type !== 'Identifier' ||
+                    scope.names.has(info.children[0].name))
+                : true;
+        }
+    }
+
+    const valid_bindings = [
+        'innerWidth',
+        'innerHeight',
+        'outerWidth',
+        'outerHeight',
+        'scrollX',
+        'scrollY',
+        'online'
+    ];
+    class Window extends Node$1 {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.handlers = [];
+            this.bindings = [];
+            this.actions = [];
+            info.attributes.forEach(node => {
+                if (node.type === 'EventHandler') {
+                    this.handlers.push(new EventHandler(component, this, scope, node));
+                }
+                else if (node.type === 'Binding') {
+                    if (node.expression.type !== 'Identifier') {
+                        const { parts } = flatten_reference(node.expression);
+                        // TODO is this constraint necessary?
+                        return component.error(node.expression, compiler_errors.invalid_binding_window(parts));
+                    }
+                    if (!~valid_bindings.indexOf(node.name)) {
+                        const match = (node.name === 'width' ? 'innerWidth' :
+                            node.name === 'height' ? 'innerHeight' :
+                                fuzzymatch(node.name, valid_bindings));
+                        if (match) {
+                            return component.error(node, compiler_errors.invalid_binding_on(node.name, '<svelte:window>', ` (did you mean '${match}'?)`));
+                        }
+                        else {
+                            return component.error(node, compiler_errors.invalid_binding_on(node.name, '<svelte:window>', ` — valid bindings are ${list(valid_bindings)}`));
+                        }
+                    }
+                    this.bindings.push(new Binding(component, this, scope, node));
+                }
+                else if (node.type === 'Action') {
+                    this.actions.push(new Action(component, this, scope, node));
+                }
+            });
+        }
+    }
+
+    /**
+     * Pushes all `items` into `array` using `push`, therefore mutating the array.
+     * We do this for memory and perf reasons, and because `array.push(...items)` would
+     * run into a "max call stack size exceeded" error with too many items (~65k).
+     * @param array
+     * @param items
+     */
+    function push_array$1(array, items) {
+        for (let i = 0; i < items.length; i++) {
+            array.push(items[i]);
+        }
+    }
+
+    function get_constructor(type) {
+        switch (type) {
+            case 'AwaitBlock': return AwaitBlock;
+            case 'Body': return Body;
+            case 'Comment': return Comment$1;
+            case 'ConstTag': return ConstTag;
+            case 'EachBlock': return EachBlock;
+            case 'Element': return Element;
+            case 'Head': return Head;
+            case 'IfBlock': return IfBlock;
+            case 'InlineComponent': return InlineComponent;
+            case 'KeyBlock': return KeyBlock;
+            case 'MustacheTag': return MustacheTag;
+            case 'Options': return Options;
+            case 'RawMustacheTag': return RawMustacheTag;
+            case 'DebugTag': return DebugTag;
+            case 'Slot': return Slot;
+            case 'SlotTemplate': return SlotTemplate;
+            case 'Text': return Text;
+            case 'Title': return Title;
+            case 'Window': return Window;
+            default: throw new Error(`Not implemented: ${type}`);
+        }
+    }
+    function map_children(component, parent, scope, children) {
+        let last = null;
+        let ignores = [];
+        return children.map(child => {
+            const constructor = get_constructor(child.type);
+            const use_ignores = child.type !== 'Text' && child.type !== 'Comment' && ignores.length;
+            if (use_ignores)
+                component.push_ignores(ignores);
+            const node = new constructor(component, parent, scope, child);
+            if (use_ignores)
+                component.pop_ignores(), ignores = [];
+            if (node.type === 'Comment' && node.ignores.length) {
+                push_array$1(ignores, node.ignores);
+            }
+            if (last)
+                last.next = node;
+            node.prev = last;
+            last = node;
+            return node;
+        });
+    }
+
+    function check_graph_for_cycles(edges) {
+        const graph = edges.reduce((g, edge) => {
+            const [u, v] = edge;
+            if (!g.has(u))
+                g.set(u, []);
+            if (!g.has(v))
+                g.set(v, []);
+            g.get(u).push(v);
+            return g;
+        }, new Map());
+        const visited = new Set();
+        const on_stack = new Set();
+        const cycles = [];
+        function visit(v) {
+            visited.add(v);
+            on_stack.add(v);
+            graph.get(v).forEach(w => {
+                if (!visited.has(w)) {
+                    visit(w);
+                }
+                else if (on_stack.has(w)) {
+                    cycles.push([...on_stack, w]);
+                }
+            });
+            on_stack.delete(v);
+        }
+        graph.forEach((_, v) => {
+            if (!visited.has(v)) {
+                visit(v);
+            }
+        });
+        return cycles[0];
+    }
+
+    function get_const_tags(children, component, node, parent) {
+        const const_tags = [];
+        const others = [];
+        for (const child of children) {
+            if (child.type === 'ConstTag') {
+                const_tags.push(child);
+            }
+            else {
+                others.push(child);
+            }
+        }
+        const consts_nodes = const_tags.map(tag => new ConstTag(component, node, node.scope, tag));
+        const sorted_consts_nodes = sort_consts_nodes(consts_nodes, component);
+        sorted_consts_nodes.forEach(node => node.parse_expression());
+        const children_nodes = map_children(component, parent, node.scope, others);
+        return [sorted_consts_nodes, children_nodes];
+    }
+    function sort_consts_nodes(consts_nodes, component) {
+        const sorted_consts_nodes = [];
+        const unsorted_consts_nodes = consts_nodes.map(node => {
+            return {
+                assignees: node.assignees,
+                dependencies: node.dependencies,
+                node
+            };
+        });
+        const lookup = new Map();
+        unsorted_consts_nodes.forEach(node => {
+            node.assignees.forEach(name => {
+                if (!lookup.has(name)) {
+                    lookup.set(name, []);
+                }
+                lookup.get(name).push(node);
+            });
+        });
+        const cycle = check_graph_for_cycles(unsorted_consts_nodes.reduce((acc, node) => {
+            node.assignees.forEach(v => {
+                node.dependencies.forEach(w => {
+                    if (!node.assignees.has(w)) {
+                        acc.push([v, w]);
+                    }
+                });
+            });
+            return acc;
+        }, []));
+        if (cycle && cycle.length) {
+            const nodeList = lookup.get(cycle[0]);
+            const node = nodeList[0];
+            component.error(node.node, compiler_errors.cyclical_const_tags(cycle));
+        }
+        const add_node = (node) => {
+            if (sorted_consts_nodes.includes(node))
+                return;
+            node.dependencies.forEach(name => {
+                if (node.assignees.has(name))
+                    return;
+                const earlier_nodes = lookup.get(name);
+                if (earlier_nodes) {
+                    earlier_nodes.forEach(add_node);
+                }
+            });
+            sorted_consts_nodes.push(node);
+        };
+        unsorted_consts_nodes.forEach(add_node);
+        return sorted_consts_nodes.map(node => node.node);
+    }
+
+    class ThenBlock extends AbstractBlock {
+        constructor(component, parent, scope, info) {
+            super(component, parent, scope, info);
+            this.scope = scope.child();
+            if (parent.then_node) {
+                parent.then_contexts.forEach(context => {
+                    this.scope.add(context.key.name, parent.expression.dependencies, this);
+                });
+            }
+            ([this.const_tags, this.children] = get_const_tags(info.children, component, this, parent));
+            if (!info.skip) {
+                this.warn_if_empty_block();
+            }
+        }
+    }
+
+    function add_const_tags(block, const_tags, ctx) {
+        const const_tags_props = [];
+        const_tags.forEach((const_tag, i) => {
+            const name = `#constants_${i}`;
+            const_tags_props.push(b `const ${name} = ${const_tag.expression.manipulate(block, ctx)}`);
+            const_tag.contexts.forEach(context => {
+                const_tags_props.push(b `${ctx}[${block.renderer.context_lookup.get(context.key.name).index}] = ${context.default_modifier(context.modifier({ type: 'Identifier', name }), name => block.renderer.context_lookup.has(name) ? x `${ctx}[${block.renderer.context_lookup.get(name).index}]` : { type: 'Identifier', name })};`);
+            });
+        });
+        return const_tags_props;
+    }
+    function add_const_tags_context(renderer, const_tags) {
+        const_tags.forEach(const_tag => {
+            const_tag.contexts.forEach(context => {
+                renderer.add_to_context(context.key.name, true);
+            });
+        });
+    }
+
+    class AwaitBlockBranch extends Wrapper {
+        constructor(status, renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.var = null;
+            this.status = status;
+            this.block = block.child({
+                comment: create_debugging_comment(node, this.renderer.component),
+                name: this.renderer.component.get_unique_name(`create_${status}_block`),
+                type: status
+            });
+            this.add_context(parent.node[status + '_node'], parent.node[status + '_contexts']);
+            this.fragment = new FragmentWrapper(renderer, this.block, this.node.children, parent, strip_whitespace, next_sibling);
+            this.is_dynamic = this.block.dependencies.size > 0;
+        }
+        add_context(node, contexts) {
+            if (!node)
+                return;
+            if (node.type === 'Identifier') {
+                this.value = node.name;
+                this.renderer.add_to_context(this.value, true);
+            }
+            else {
+                contexts.forEach(context => {
+                    this.renderer.add_to_context(context.key.name, true);
+                });
+                this.value = this.block.parent.get_unique_name('value').name;
+                this.value_contexts = contexts;
+                this.renderer.add_to_context(this.value, true);
+                this.is_destructured = true;
+            }
+            this.value_index = this.renderer.context_lookup.get(this.value).index;
+            if (this.has_consts(this.node)) {
+                add_const_tags_context(this.renderer, this.node.const_tags);
+            }
+        }
+        has_consts(node) {
+            return node instanceof ThenBlock || node instanceof CatchBlock;
+        }
+        render(block, parent_node, parent_nodes) {
+            this.fragment.render(block, parent_node, parent_nodes);
+            if (this.is_destructured || (this.has_consts(this.node) && this.node.const_tags.length > 0)) {
+                this.render_get_context();
+            }
+        }
+        render_get_context() {
+            const props = this.is_destructured ? this.value_contexts.map(prop => b `#ctx[${this.block.renderer.context_lookup.get(prop.key.name).index}] = ${prop.default_modifier(prop.modifier(x `#ctx[${this.value_index}]`), name => this.renderer.reference(name))};`) : null;
+            const const_tags_props = this.has_consts(this.node) ? add_const_tags(this.block, this.node.const_tags, '#ctx') : null;
+            const get_context = this.block.renderer.component.get_unique_name(`get_${this.status}_context`);
+            this.block.renderer.blocks.push(b `
+			function ${get_context}(#ctx) {
+				${props}
+				${const_tags_props}
+			}
+		`);
+            this.block.chunks.declarations.push(b `${get_context}(#ctx)`);
+            if (this.block.has_update_method) {
+                this.block.chunks.update.unshift(b `${get_context}(#ctx)`);
+            }
+        }
+    }
+    class AwaitBlockWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.var = { type: 'Identifier', name: 'await_block' };
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            block.add_dependencies(this.node.expression.dependencies);
+            let is_dynamic = false;
+            let has_intros = false;
+            let has_outros = false;
+            ['pending', 'then', 'catch'].forEach((status) => {
+                const child = this.node[status];
+                const branch = new AwaitBlockBranch(status, renderer, block, this, child, strip_whitespace, next_sibling);
+                renderer.blocks.push(branch.block);
+                if (branch.is_dynamic) {
+                    is_dynamic = true;
+                    // TODO should blocks update their own parents?
+                    block.add_dependencies(branch.block.dependencies);
+                }
+                if (branch.block.has_intros)
+                    has_intros = true;
+                if (branch.block.has_outros)
+                    has_outros = true;
+                this[status] = branch;
+            });
+            ['pending', 'then', 'catch'].forEach(status => {
+                this[status].block.has_update_method = is_dynamic;
+                this[status].block.has_intro_method = has_intros;
+                this[status].block.has_outro_method = has_outros;
+            });
+            if (has_outros) {
+                block.add_outro();
+            }
+        }
+        render(block, parent_node, parent_nodes) {
+            const anchor = this.get_or_create_anchor(block, parent_node, parent_nodes);
+            const update_mount_node = this.get_update_mount_node(anchor);
+            const snippet = this.node.expression.manipulate(block);
+            const info = block.get_unique_name('info');
+            const promise = block.get_unique_name('promise');
+            block.add_variable(promise);
+            block.maintain_context = true;
+            const info_props = x `{
+			ctx: #ctx,
+			current: null,
+			token: null,
+			hasCatch: ${this.catch.node.start !== null ? 'true' : 'false'},
+			pending: ${this.pending.block.name},
+			then: ${this.then.block.name},
+			catch: ${this.catch.block.name},
+			value: ${this.then.value_index},
+			error: ${this.catch.value_index},
+			blocks: ${this.pending.block.has_outro_method && x `[,,,]`}
+		}`;
+            block.chunks.init.push(b `
+			let ${info} = ${info_props};
+		`);
+            block.chunks.init.push(b `
+			@handle_promise(${promise} = ${snippet}, ${info});
+		`);
+            block.chunks.create.push(b `
+			${info}.block.c();
+		`);
+            if (parent_nodes && this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `
+				${info}.block.l(${parent_nodes});
+			`);
+            }
+            const initial_mount_node = parent_node || '#target';
+            const anchor_node = parent_node ? 'null' : '#anchor';
+            const has_transitions = this.pending.block.has_intro_method || this.pending.block.has_outro_method;
+            block.chunks.mount.push(b `
+			${info}.block.m(${initial_mount_node}, ${info}.anchor = ${anchor_node});
+			${info}.mount = () => ${update_mount_node};
+			${info}.anchor = ${anchor};
+		`);
+            if (has_transitions) {
+                block.chunks.intro.push(b `@transition_in(${info}.block);`);
+            }
+            const dependencies = this.node.expression.dynamic_dependencies();
+            const update_await_block_branch = b `@update_await_block_branch(${info}, #ctx, #dirty)`;
+            if (dependencies.length > 0) {
+                const condition = x `
+				${block.renderer.dirty(dependencies)} &&
+				${promise} !== (${promise} = ${snippet}) &&
+				@handle_promise(${promise}, ${info})`;
+                block.chunks.update.push(b `${info}.ctx = #ctx;`);
+                if (this.pending.block.has_update_method) {
+                    block.chunks.update.push(b `
+					if (${condition}) {
+
+					} else {
+						${update_await_block_branch}
+					}
+				`);
+                }
+                else {
+                    block.chunks.update.push(b `
+					${condition}
+				`);
+                }
+            }
+            else {
+                if (this.pending.block.has_update_method) {
+                    block.chunks.update.push(b `
+					${update_await_block_branch}
+				`);
+                }
+            }
+            if (this.pending.block.has_outro_method) {
+                block.chunks.outro.push(b `
+				for (let #i = 0; #i < 3; #i += 1) {
+					const block = ${info}.blocks[#i];
+					@transition_out(block);
+				}
+			`);
+            }
+            block.chunks.destroy.push(b `
+			${info}.block.d(${parent_node ? null : 'detaching'});
+			${info}.token = null;
+			${info} = null;
+		`);
+            [this.pending, this.then, this.catch].forEach(branch => {
+                branch.render(branch.block, null, x `#nodes`);
+            });
+        }
+    }
+
+    const TRUE = x `true`;
+    const FALSE = x `false`;
+    class EventHandlerWrapper {
+        constructor(node, parent) {
+            this.node = node;
+            this.parent = parent;
+            if (!node.expression) {
+                this.parent.renderer.add_to_context(node.handler_name.name);
+                this.parent.renderer.component.partly_hoisted.push(b `
+				function ${node.handler_name.name}(event) {
+					@bubble.call(this, $$self, event);
+				}
+			`);
+            }
+        }
+        get_snippet(block) {
+            const snippet = this.node.expression ? this.node.expression.manipulate(block) : block.renderer.reference(this.node.handler_name);
+            if (this.node.reassigned) {
+                block.maintain_context = true;
+                return x `function () { if (@is_function(${snippet})) ${snippet}.apply(this, arguments); }`;
+            }
+            return snippet;
+        }
+        render(block, target) {
+            let snippet = this.get_snippet(block);
+            if (this.node.modifiers.has('preventDefault'))
+                snippet = x `@prevent_default(${snippet})`;
+            if (this.node.modifiers.has('stopPropagation'))
+                snippet = x `@stop_propagation(${snippet})`;
+            if (this.node.modifiers.has('self'))
+                snippet = x `@self(${snippet})`;
+            if (this.node.modifiers.has('trusted'))
+                snippet = x `@trusted(${snippet})`;
+            const args = [];
+            const opts = ['nonpassive', 'passive', 'once', 'capture'].filter(mod => this.node.modifiers.has(mod));
+            if (opts.length) {
+                if (opts.length === 1 && opts[0] === 'capture') {
+                    args.push(TRUE);
+                }
+                else {
+                    args.push(x `{ ${opts.map(opt => opt === 'nonpassive'
+                    ? p `passive: false`
+                    : p `${opt}: true`)} }`);
+                }
+            }
+            else if (block.renderer.options.dev) {
+                args.push(FALSE);
+            }
+            if (block.renderer.options.dev) {
+                args.push(this.node.modifiers.has('preventDefault') ? TRUE : FALSE);
+                args.push(this.node.modifiers.has('stopPropagation') ? TRUE : FALSE);
+            }
+            block.event_listeners.push(x `@listen(${target}, "${this.node.name}", ${snippet}, ${args})`);
+        }
+    }
+
+    function add_event_handlers(block, target, handlers) {
+        handlers.forEach(handler => add_event_handler(block, target, handler));
+    }
+    function add_event_handler(block, target, handler) {
+        handler.render(block, target);
+    }
+
+    function add_actions(block, target, actions) {
+        actions.forEach(action => add_action(block, target, action));
+    }
+    function add_action(block, target, action) {
+        const { expression, template_scope } = action;
+        let snippet;
+        let dependencies;
+        if (expression) {
+            snippet = expression.manipulate(block);
+            dependencies = expression.dynamic_dependencies();
+        }
+        const id = block.get_unique_name(`${action.name.replace(/[^a-zA-Z0-9_$]/g, '_')}_action`);
+        block.add_variable(id);
+        const [obj, ...properties] = action.name.split('.');
+        const fn = is_contextual(action.component, template_scope, obj)
+            ? block.renderer.reference(obj)
+            : obj;
+        if (properties.length) {
+            const member_expression = properties.reduce((lhs, rhs) => x `${lhs}.${rhs}`, fn);
+            block.event_listeners.push(x `@action_destroyer(${id} = ${member_expression}(${target}, ${snippet}))`);
+        }
+        else {
+            block.event_listeners.push(x `@action_destroyer(${id} = ${fn}.call(null, ${target}, ${snippet}))`);
+        }
+        if (dependencies && dependencies.length > 0) {
+            let condition = x `${id} && @is_function(${id}.update)`;
+            if (dependencies.length > 0) {
+                condition = x `${condition} && ${block.renderer.dirty(dependencies)}`;
+            }
+            block.chunks.update.push(b `if (${condition}) ${id}.update.call(null, ${snippet});`);
+        }
+    }
+
+    class BodyWrapper extends Wrapper {
+        constructor(renderer, block, parent, node) {
+            super(renderer, block, parent, node);
+            this.handlers = this.node.handlers.map(handler => new EventHandlerWrapper(handler, this));
+        }
+        render(block, _parent_node, _parent_nodes) {
+            add_event_handlers(block, x `@_document.body`, this.handlers);
+            add_actions(block, x `@_document.body`, this.node.actions);
+        }
+    }
+
+    class DebugTagWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, _strip_whitespace, _next_sibling) {
+            super(renderer, block, parent, node);
+        }
+        render(block, _parent_node, _parent_nodes) {
+            const { renderer } = this;
+            const { component } = renderer;
+            if (!renderer.options.dev)
+                return;
+            const { var_lookup } = component;
+            const start = component.locate(this.node.start + 1);
+            const end = { line: start.line, column: start.column + 6 };
+            const loc = { start, end };
+            const debug = {
+                type: 'DebuggerStatement',
+                loc
+            };
+            if (this.node.expressions.length === 0) {
+                // Debug all
+                block.chunks.create.push(debug);
+                block.chunks.update.push(debug);
+            }
+            else {
+                const log = {
+                    type: 'Identifier',
+                    name: 'log',
+                    loc
+                };
+                const dependencies = new Set();
+                this.node.expressions.forEach(expression => {
+                    add_to_set(dependencies, expression.dependencies);
+                });
+                const contextual_identifiers = this.node.expressions
+                    .filter(e => {
+                    const variable = var_lookup.get(e.node.name);
+                    return !(variable && variable.hoistable);
+                })
+                    .map(e => e.node.name);
+                const logged_identifiers = this.node.expressions.map(e => p `${e.node.name}`);
+                const debug_statements = b `
+				${contextual_identifiers.map(name => b `const ${name} = ${renderer.reference(name)};`)}
+				@_console.${log}({ ${logged_identifiers} });
+				debugger;`;
+                if (dependencies.size) {
+                    const condition = renderer.dirty(Array.from(dependencies));
+                    block.chunks.update.push(b `
+					if (${condition}) {
+						${debug_statements}
+					}
+				`);
+                }
+                block.chunks.create.push(b `{
+				${debug_statements}
+			}`);
+            }
+        }
+    }
+
+    class ElseBlockWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.var = null;
+            add_const_tags_context(renderer, this.node.const_tags);
+            this.block = block.child({
+                comment: create_debugging_comment(node, this.renderer.component),
+                name: this.renderer.component.get_unique_name('create_else_block'),
+                type: 'else'
+            });
+            this.fragment = new FragmentWrapper(renderer, this.block, this.node.children, parent, strip_whitespace, next_sibling);
+            this.is_dynamic = this.block.dependencies.size > 0;
+        }
+    }
+    class EachBlockWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.updates = [];
+            this.var = { type: 'Identifier', name: 'each' };
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            const { dependencies } = node.expression;
+            block.add_dependencies(dependencies);
+            this.node.contexts.forEach(context => {
+                renderer.add_to_context(context.key.name, true);
+            });
+            add_const_tags_context(renderer, this.node.const_tags);
+            this.block = block.child({
+                comment: create_debugging_comment(this.node, this.renderer.component),
+                name: renderer.component.get_unique_name('create_each_block'),
+                type: 'each',
+                // @ts-ignore todo: probably error
+                key: node.key,
+                bindings: new Map(block.bindings)
+            });
+            // TODO this seems messy
+            this.block.has_animation = this.node.has_animation;
+            this.index_name = this.node.index
+                ? { type: 'Identifier', name: this.node.index }
+                : renderer.component.get_unique_name(`${this.node.context}_index`);
+            const fixed_length = node.expression.node.type === 'ArrayExpression' &&
+                node.expression.node.elements.every(element => element.type !== 'SpreadElement')
+                ? node.expression.node.elements.length
+                : null;
+            // hack the sourcemap, so that if data is missing the bug
+            // is easy to find
+            let c = this.node.start + 2;
+            while (renderer.component.source[c] !== 'e')
+                c += 1;
+            const start = renderer.component.locate(c);
+            const end = { line: start.line, column: start.column + 4 };
+            const length = {
+                type: 'Identifier',
+                name: 'length',
+                loc: { start, end }
+            };
+            const each_block_value = renderer.component.get_unique_name(`${this.var.name}_value`);
+            const iterations = block.get_unique_name(`${this.var.name}_blocks`);
+            renderer.add_to_context(each_block_value.name, true);
+            renderer.add_to_context(this.index_name.name, true);
+            this.vars = {
+                create_each_block: this.block.name,
+                each_block_value,
+                get_each_context: renderer.component.get_unique_name(`get_${this.var.name}_context`),
+                iterations,
+                // optimisation for array literal
+                fixed_length,
+                data_length: fixed_length === null ? x `${each_block_value}.${length}` : fixed_length,
+                view_length: fixed_length === null ? x `${iterations}.length` : fixed_length
+            };
+            const object = get_object(node.expression.node);
+            const store = object.type === 'Identifier' && object.name[0] === '$' ? object.name.slice(1) : null;
+            node.contexts.forEach(prop => {
+                this.block.bindings.set(prop.key.name, {
+                    object: this.vars.each_block_value,
+                    property: this.index_name,
+                    modifier: prop.modifier,
+                    snippet: prop.modifier(x `${this.vars.each_block_value}[${this.index_name}]`),
+                    store
+                });
+            });
+            if (this.node.index) {
+                this.block.get_unique_name(this.node.index); // this prevents name collisions (#1254)
+            }
+            renderer.blocks.push(this.block);
+            this.fragment = new FragmentWrapper(renderer, this.block, node.children, this, strip_whitespace, next_sibling);
+            if (this.node.else) {
+                this.else = new ElseBlockWrapper(renderer, block, this, this.node.else, strip_whitespace, next_sibling);
+                renderer.blocks.push(this.else.block);
+                if (this.else.is_dynamic) {
+                    this.block.add_dependencies(this.else.block.dependencies);
+                }
+            }
+            block.add_dependencies(this.block.dependencies);
+            if (this.block.has_outros || (this.else && this.else.block.has_outros)) {
+                block.add_outro();
+            }
+        }
+        render(block, parent_node, parent_nodes) {
+            if (this.fragment.nodes.length === 0)
+                return;
+            const { renderer } = this;
+            const { component } = renderer;
+            const needs_anchor = this.next
+                ? !this.next.is_dom_node() :
+                !parent_node || !this.parent.is_dom_node();
+            const snippet = this.node.expression.manipulate(block);
+            block.chunks.init.push(b `let ${this.vars.each_block_value} = ${snippet};`);
+            if (this.renderer.options.dev) {
+                block.chunks.init.push(b `@validate_each_argument(${this.vars.each_block_value});`);
+            }
+            const initial_anchor_node = { type: 'Identifier', name: parent_node ? 'null' : '#anchor' };
+            const initial_mount_node = parent_node || { type: 'Identifier', name: '#target' };
+            const update_anchor_node = needs_anchor
+                ? block.get_unique_name(`${this.var.name}_anchor`)
+                : (this.next && this.next.var) || { type: 'Identifier', name: 'null' };
+            const update_mount_node = this.get_update_mount_node(update_anchor_node);
+            const args = {
+                block,
+                parent_node,
+                parent_nodes,
+                snippet,
+                initial_anchor_node,
+                initial_mount_node,
+                update_anchor_node,
+                update_mount_node
+            };
+            const all_dependencies = new Set(this.block.dependencies); // TODO should be dynamic deps only
+            this.node.expression.dynamic_dependencies().forEach((dependency) => {
+                all_dependencies.add(dependency);
+            });
+            if (this.node.key) {
+                this.node.key.dynamic_dependencies().forEach((dependency) => {
+                    all_dependencies.add(dependency);
+                });
+            }
+            this.dependencies = all_dependencies;
+            if (this.node.key) {
+                this.render_keyed(args);
+            }
+            else {
+                this.render_unkeyed(args);
+            }
+            if (this.block.has_intro_method || this.block.has_outro_method) {
+                block.chunks.intro.push(b `
+				for (let #i = 0; #i < ${this.vars.data_length}; #i += 1) {
+					@transition_in(${this.vars.iterations}[#i]);
+				}
+			`);
+            }
+            if (needs_anchor) {
+                block.add_element(update_anchor_node, x `@empty()`, parent_nodes && x `@empty()`, parent_node);
+            }
+            if (this.else) {
+                let else_ctx = x `#ctx`;
+                if (this.else.node.const_tags.length > 0) {
+                    const get_ctx_name = this.renderer.component.get_unique_name('get_else_ctx');
+                    this.renderer.blocks.push(b `
+					function ${get_ctx_name}(#ctx) {
+						const child_ctx = #ctx.slice();
+						${add_const_tags(block, this.else.node.const_tags, 'child_ctx')}
+						return child_ctx;
+					}
+				`);
+                    else_ctx = x `${get_ctx_name}(#ctx)`;
+                }
+                const each_block_else = component.get_unique_name(`${this.var.name}_else`);
+                block.chunks.init.push(b `let ${each_block_else} = null;`);
+                // TODO neaten this up... will end up with an empty line in the block
+                block.chunks.init.push(b `
+				if (!${this.vars.data_length}) {
+					${each_block_else} = ${this.else.block.name}(${else_ctx});
+				}
+			`);
+                block.chunks.create.push(b `
+				if (${each_block_else}) {
+					${each_block_else}.c();
+				}
+			`);
+                if (this.renderer.options.hydratable) {
+                    block.chunks.claim.push(b `
+					if (${each_block_else}) {
+						${each_block_else}.l(${parent_nodes});
+					}
+				`);
+                }
+                block.chunks.mount.push(b `
+				if (${each_block_else}) {
+					${each_block_else}.m(${initial_mount_node}, ${initial_anchor_node});
+				}
+			`);
+                const has_transitions = !!(this.else.block.has_intro_method || this.else.block.has_outro_method);
+                const destroy_block_else = this.else.block.has_outro_method
+                    ? b `
+					@group_outros();
+					@transition_out(${each_block_else}, 1, 1, () => {
+						${each_block_else} = null;
+					});
+					@check_outros();`
+                    : b `
+					${each_block_else}.d(1);
+					${each_block_else} = null;`;
+                if (this.else.block.has_update_method) {
+                    this.updates.push(b `
+					if (!${this.vars.data_length} && ${each_block_else}) {
+						${each_block_else}.p(${else_ctx}, #dirty);
+					} else if (!${this.vars.data_length}) {
+						${each_block_else} = ${this.else.block.name}(${else_ctx});
+						${each_block_else}.c();
+						${has_transitions && b `@transition_in(${each_block_else}, 1);`}
+						${each_block_else}.m(${update_mount_node}, ${update_anchor_node});
+					} else if (${each_block_else}) {
+						${destroy_block_else};
+					}
+				`);
+                }
+                else {
+                    this.updates.push(b `
+					if (${this.vars.data_length}) {
+						if (${each_block_else}) {
+							${destroy_block_else};
+						}
+					} else if (!${each_block_else}) {
+						${each_block_else} = ${this.else.block.name}(${else_ctx});
+						${each_block_else}.c();
+						${has_transitions && b `@transition_in(${each_block_else}, 1);`}
+						${each_block_else}.m(${update_mount_node}, ${update_anchor_node});
+					}
+				`);
+                }
+                block.chunks.destroy.push(b `
+				if (${each_block_else}) ${each_block_else}.d(${parent_node ? '' : 'detaching'});
+			`);
+            }
+            if (this.updates.length) {
+                block.chunks.update.push(b `
+				if (${block.renderer.dirty(Array.from(all_dependencies))}) {
+					${this.updates}
+				}
+			`);
+            }
+            this.fragment.render(this.block, null, x `#nodes`);
+            if (this.else) {
+                this.else.fragment.render(this.else.block, null, x `#nodes`);
+            }
+            this.context_props = this.node.contexts.map(prop => b `child_ctx[${renderer.context_lookup.get(prop.key.name).index}] = ${prop.default_modifier(prop.modifier(x `list[i]`), name => renderer.context_lookup.has(name) ? x `child_ctx[${renderer.context_lookup.get(name).index}]` : { type: 'Identifier', name })};`);
+            if (this.node.has_binding)
+                this.context_props.push(b `child_ctx[${renderer.context_lookup.get(this.vars.each_block_value.name).index}] = list;`);
+            if (this.node.has_binding || this.node.has_index_binding || this.node.index)
+                this.context_props.push(b `child_ctx[${renderer.context_lookup.get(this.index_name.name).index}] = i;`);
+            // TODO which is better — Object.create(array) or array.slice()?
+            renderer.blocks.push(b `
+			function ${this.vars.get_each_context}(#ctx, list, i) {
+				const child_ctx = #ctx.slice();
+				${this.context_props}
+				${add_const_tags(this.block, this.node.const_tags, 'child_ctx')}
+				return child_ctx;
+			}
+		`);
+        }
+        render_keyed({ block, parent_node, parent_nodes, snippet, initial_anchor_node, initial_mount_node, update_anchor_node, update_mount_node }) {
+            const { create_each_block, iterations, data_length, view_length } = this.vars;
+            const get_key = block.get_unique_name('get_key');
+            const lookup = block.get_unique_name(`${this.var.name}_lookup`);
+            block.add_variable(iterations, x `[]`);
+            block.add_variable(lookup, x `new @_Map()`);
+            if (this.fragment.nodes[0].is_dom_node()) {
+                this.block.first = this.fragment.nodes[0].var;
+            }
+            else {
+                this.block.first = this.block.get_unique_name('first');
+                this.block.add_element(this.block.first, x `@empty()`, parent_nodes && x `@empty()`, null);
+            }
+            block.chunks.init.push(b `
+			const ${get_key} = #ctx => ${this.node.key.manipulate(block)};
+
+			${this.renderer.options.dev && b `@validate_each_keys(#ctx, ${this.vars.each_block_value}, ${this.vars.get_each_context}, ${get_key});`}
+			for (let #i = 0; #i < ${data_length}; #i += 1) {
+				let child_ctx = ${this.vars.get_each_context}(#ctx, ${this.vars.each_block_value}, #i);
+				let key = ${get_key}(child_ctx);
+				${lookup}.set(key, ${iterations}[#i] = ${create_each_block}(key, child_ctx));
+			}
+		`);
+            block.chunks.create.push(b `
+			for (let #i = 0; #i < ${view_length}; #i += 1) {
+				${iterations}[#i].c();
+			}
+		`);
+            if (parent_nodes && this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `
+				for (let #i = 0; #i < ${view_length}; #i += 1) {
+					${iterations}[#i].l(${parent_nodes});
+				}
+			`);
+            }
+            block.chunks.mount.push(b `
+			for (let #i = 0; #i < ${view_length}; #i += 1) {
+				${iterations}[#i].m(${initial_mount_node}, ${initial_anchor_node});
+			}
+		`);
+            const dynamic = this.block.has_update_method;
+            const destroy = this.node.has_animation
+                ? (this.block.has_outros
+                    ? '@fix_and_outro_and_destroy_block'
+                    : '@fix_and_destroy_block')
+                : this.block.has_outros
+                    ? '@outro_and_destroy_block'
+                    : '@destroy_block';
+            if (this.dependencies.size) {
+                this.block.maintain_context = true;
+                this.updates.push(b `
+				${this.vars.each_block_value} = ${snippet};
+				${this.renderer.options.dev && b `@validate_each_argument(${this.vars.each_block_value});`}
+
+				${this.block.has_outros && b `@group_outros();`}
+				${this.node.has_animation && b `for (let #i = 0; #i < ${view_length}; #i += 1) ${iterations}[#i].r();`}
+				${this.renderer.options.dev && b `@validate_each_keys(#ctx, ${this.vars.each_block_value}, ${this.vars.get_each_context}, ${get_key});`}
+				${iterations} = @update_keyed_each(${iterations}, #dirty, ${get_key}, ${dynamic ? 1 : 0}, #ctx, ${this.vars.each_block_value}, ${lookup}, ${update_mount_node}, ${destroy}, ${create_each_block}, ${update_anchor_node}, ${this.vars.get_each_context});
+				${this.node.has_animation && b `for (let #i = 0; #i < ${view_length}; #i += 1) ${iterations}[#i].a();`}
+				${this.block.has_outros && b `@check_outros();`}
+			`);
+            }
+            if (this.block.has_outros) {
+                block.chunks.outro.push(b `
+				for (let #i = 0; #i < ${view_length}; #i += 1) {
+					@transition_out(${iterations}[#i]);
+				}
+			`);
+            }
+            block.chunks.destroy.push(b `
+			for (let #i = 0; #i < ${view_length}; #i += 1) {
+				${iterations}[#i].d(${parent_node ? null : 'detaching'});
+			}
+		`);
+        }
+        render_unkeyed({ block, parent_nodes, snippet, initial_anchor_node, initial_mount_node, update_anchor_node, update_mount_node }) {
+            const { create_each_block, iterations, fixed_length, data_length, view_length } = this.vars;
+            block.chunks.init.push(b `
+			let ${iterations} = [];
+
+			for (let #i = 0; #i < ${data_length}; #i += 1) {
+				${iterations}[#i] = ${create_each_block}(${this.vars.get_each_context}(#ctx, ${this.vars.each_block_value}, #i));
+			}
+		`);
+            block.chunks.create.push(b `
+			for (let #i = 0; #i < ${view_length}; #i += 1) {
+				${iterations}[#i].c();
+			}
+		`);
+            if (parent_nodes && this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `
+				for (let #i = 0; #i < ${view_length}; #i += 1) {
+					${iterations}[#i].l(${parent_nodes});
+				}
+			`);
+            }
+            block.chunks.mount.push(b `
+			for (let #i = 0; #i < ${view_length}; #i += 1) {
+				${iterations}[#i].m(${initial_mount_node}, ${initial_anchor_node});
+			}
+		`);
+            if (this.dependencies.size) {
+                const has_transitions = !!(this.block.has_intro_method || this.block.has_outro_method);
+                const for_loop_body = this.block.has_update_method
+                    ? b `
+					if (${iterations}[#i]) {
+						${iterations}[#i].p(child_ctx, #dirty);
+						${has_transitions && b `@transition_in(${this.vars.iterations}[#i], 1);`}
+					} else {
+						${iterations}[#i] = ${create_each_block}(child_ctx);
+						${iterations}[#i].c();
+						${has_transitions && b `@transition_in(${this.vars.iterations}[#i], 1);`}
+						${iterations}[#i].m(${update_mount_node}, ${update_anchor_node});
+					}
+				`
+                    : has_transitions
+                        ? b `
+						if (${iterations}[#i]) {
+							@transition_in(${this.vars.iterations}[#i], 1);
+						} else {
+							${iterations}[#i] = ${create_each_block}(child_ctx);
+							${iterations}[#i].c();
+							@transition_in(${this.vars.iterations}[#i], 1);
+							${iterations}[#i].m(${update_mount_node}, ${update_anchor_node});
+						}
+					`
+                        : b `
+						if (!${iterations}[#i]) {
+							${iterations}[#i] = ${create_each_block}(child_ctx);
+							${iterations}[#i].c();
+							${iterations}[#i].m(${update_mount_node}, ${update_anchor_node});
+						}
+					`;
+                const start = this.block.has_update_method ? 0 : '#old_length';
+                let remove_old_blocks;
+                if (this.block.has_outros) {
+                    const out = block.get_unique_name('out');
+                    block.chunks.init.push(b `
+					const ${out} = i => @transition_out(${iterations}[i], 1, 1, () => {
+						${iterations}[i] = null;
+					});
+				`);
+                    remove_old_blocks = b `
+					@group_outros();
+					for (#i = ${data_length}; #i < ${view_length}; #i += 1) {
+						${out}(#i);
+					}
+					@check_outros();
+				`;
+                }
+                else {
+                    remove_old_blocks = b `
+					for (${this.block.has_update_method ? null : x `#i = ${data_length}`}; #i < ${this.block.has_update_method ? view_length : '#old_length'}; #i += 1) {
+						${iterations}[#i].d(1);
+					}
+					${!fixed_length && b `${view_length} = ${data_length};`}
+				`;
+                }
+                // We declare `i` as block scoped here, as the `remove_old_blocks` code
+                // may rely on continuing where this iteration stopped.
+                const update = b `
+				${!this.block.has_update_method && b `const #old_length = ${this.vars.each_block_value}.length;`}
+				${this.vars.each_block_value} = ${snippet};
+				${this.renderer.options.dev && b `@validate_each_argument(${this.vars.each_block_value});`}
+
+				let #i;
+				for (#i = ${start}; #i < ${data_length}; #i += 1) {
+					const child_ctx = ${this.vars.get_each_context}(#ctx, ${this.vars.each_block_value}, #i);
+
+					${for_loop_body}
+				}
+
+				${remove_old_blocks}
+			`;
+                this.updates.push(update);
+            }
+            if (this.block.has_outros) {
+                block.chunks.outro.push(b `
+				${iterations} = ${iterations}.filter(@_Boolean);
+				for (let #i = 0; #i < ${view_length}; #i += 1) {
+					@transition_out(${iterations}[#i]);
+				}
+			`);
+            }
+            block.chunks.destroy.push(b `@destroy_each(${iterations}, detaching);`);
+        }
+    }
+
+    class TextWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, data) {
+            super(renderer, block, parent, node);
+            this.skip = this.node.should_skip();
+            this.data = data;
+            this.var = (this.skip ? null : x `t`);
+        }
+        use_space() {
+            if (this.renderer.component.component_options.preserveWhitespace)
+                return false;
+            if (/[\S\u00A0]/.test(this.data))
+                return false;
+            return !this.node.within_pre();
+        }
+        render(block, parent_node, parent_nodes) {
+            if (this.skip)
+                return;
+            const use_space = this.use_space();
+            const string_literal = {
+                type: 'Literal',
+                value: this.data,
+                loc: {
+                    start: this.renderer.locate(this.node.start),
+                    end: this.renderer.locate(this.node.end)
+                }
+            };
+            block.add_element(this.var, use_space ? x `@space()` : x `@text(${string_literal})`, parent_nodes && (use_space ? x `@claim_space(${parent_nodes})` : x `@claim_text(${parent_nodes}, ${string_literal})`), parent_node);
+        }
+    }
 
     const svg_attributes = 'accent-height accumulate additive alignment-baseline allowReorder alphabetic amplitude arabic-form ascent attributeName attributeType autoReverse azimuth baseFrequency baseline-shift baseProfile bbox begin bias by calcMode cap-height class clip clipPathUnits clip-path clip-rule color color-interpolation color-interpolation-filters color-profile color-rendering contentScriptType contentStyleType cursor cx cy d decelerate descent diffuseConstant direction display divisor dominant-baseline dur dx dy edgeMode elevation enable-background end exponent externalResourcesRequired fill fill-opacity fill-rule filter filterRes filterUnits flood-color flood-opacity font-family font-size font-size-adjust font-stretch font-style font-variant font-weight format from fr fx fy g1 g2 glyph-name glyph-orientation-horizontal glyph-orientation-vertical glyphRef gradientTransform gradientUnits hanging height href horiz-adv-x horiz-origin-x id ideographic image-rendering in in2 intercept k k1 k2 k3 k4 kernelMatrix kernelUnitLength kerning keyPoints keySplines keyTimes lang lengthAdjust letter-spacing lighting-color limitingConeAngle local marker-end marker-mid marker-start markerHeight markerUnits markerWidth mask maskContentUnits maskUnits mathematical max media method min mode name numOctaves offset onabort onactivate onbegin onclick onend onerror onfocusin onfocusout onload onmousedown onmousemove onmouseout onmouseover onmouseup onrepeat onresize onscroll onunload opacity operator order orient orientation origin overflow overline-position overline-thickness panose-1 paint-order pathLength patternContentUnits patternTransform patternUnits pointer-events points pointsAtX pointsAtY pointsAtZ preserveAlpha preserveAspectRatio primitiveUnits r radius refX refY rendering-intent repeatCount repeatDur requiredExtensions requiredFeatures restart result rotate rx ry scale seed shape-rendering slope spacing specularConstant specularExponent speed spreadMethod startOffset stdDeviation stemh stemv stitchTiles stop-color stop-opacity strikethrough-position strikethrough-thickness string stroke stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit stroke-opacity stroke-width style surfaceScale systemLanguage tabindex tableValues target targetX targetY text-anchor text-decoration text-rendering textLength to transform type u1 u2 underline-position underline-thickness unicode unicode-bidi unicode-range units-per-em v-alphabetic v-hanging v-ideographic v-mathematical values version vert-adv-y vert-origin-x vert-origin-y viewBox viewTarget visibility width widths word-spacing writing-mode x x-height x1 x2 xChannelSelector xlink:actuate xlink:arcrole xlink:href xlink:role xlink:show xlink:title xlink:type xml:base xml:lang xml:space y y1 y2 yChannelSelector z zoomAndPan'.split(' ');
     const svg_attribute_lookup = new Map();
     svg_attributes.forEach(name => {
         svg_attribute_lookup.set(name.toLowerCase(), name);
     });
+    function fix_attribute_casing(name) {
+        name = name.toLowerCase();
+        return svg_attribute_lookup.get(name) || name;
+    }
+
+    function handle_select_value_binding(attr, dependencies) {
+        const { parent } = attr;
+        if (parent.node.name === 'select') {
+            parent.select_binding_dependencies = dependencies;
+            dependencies.forEach((prop) => {
+                parent.renderer.component.indirect_dependencies.set(prop, new Set());
+            });
+        }
+    }
+
+    const non_textlike_input_types = new Set([
+        'button',
+        'checkbox',
+        'color',
+        'date',
+        'datetime-local',
+        'file',
+        'hidden',
+        'image',
+        'radio',
+        'range',
+        'reset',
+        'submit'
+    ]);
+    class BaseAttributeWrapper {
+        constructor(parent, block, node) {
+            this.node = node;
+            this.parent = parent;
+            if (node.dependencies.size > 0) {
+                parent.cannot_use_innerhtml();
+                parent.not_static_content();
+                block.add_dependencies(node.dependencies);
+            }
+        }
+        render(_block) { }
+    }
+    class AttributeWrapper extends BaseAttributeWrapper {
+        constructor(parent, block, node) {
+            super(parent, block, node);
+            if (node.dependencies.size > 0) {
+                // special case — <option value={foo}> — see below
+                if (this.parent.node.name === 'option' && node.name === 'value') {
+                    let select = this.parent;
+                    while (select && (select.node.type !== 'Element' || select.node.name !== 'select')) {
+                        // @ts-ignore todo: doublecheck this, but looks to be correct
+                        select = select.parent;
+                    }
+                    if (select && select.select_binding_dependencies) {
+                        select.select_binding_dependencies.forEach(prop => {
+                            this.node.dependencies.forEach((dependency) => {
+                                this.parent.renderer.component.indirect_dependencies.get(prop).add(dependency);
+                            });
+                        });
+                    }
+                }
+                if (node.name === 'value') {
+                    handle_select_value_binding(this, node.dependencies);
+                }
+            }
+            if (this.parent.node.namespace == namespaces.foreign) {
+                // leave attribute case alone for elements in the "foreign" namespace
+                this.name = this.node.name;
+                this.metadata = this.get_metadata();
+                this.is_indirectly_bound_value = false;
+                this.property_name = null;
+                this.is_select_value_attribute = false;
+                this.is_input_value = false;
+            }
+            else {
+                this.name = fix_attribute_casing(this.node.name);
+                this.metadata = this.get_metadata();
+                this.is_indirectly_bound_value = is_indirectly_bound_value(this);
+                this.property_name = this.is_indirectly_bound_value
+                    ? '__value'
+                    : this.metadata && this.metadata.property_name;
+                this.is_select_value_attribute = this.name === 'value' && this.parent.node.name === 'select';
+                this.is_input_value = this.name === 'value' && this.parent.node.name === 'input';
+            }
+            // TODO retire this exception in favour of https://github.com/sveltejs/svelte/issues/3750
+            this.is_src = this.name === 'src' && (!this.parent.node.namespace || this.parent.node.namespace === namespaces.html);
+            this.should_cache = should_cache(this);
+        }
+        render(block) {
+            const element = this.parent;
+            const { name, property_name, should_cache, is_indirectly_bound_value } = this;
+            // xlink is a special case... we could maybe extend this to generic
+            // namespaced attributes but I'm not sure that's applicable in
+            // HTML5?
+            const method = /-/.test(element.node.name)
+                ? '@set_custom_element_data'
+                : name.slice(0, 6) === 'xlink:'
+                    ? '@xlink_attr'
+                    : '@attr';
+            const is_legacy_input_type = element.renderer.component.compile_options.legacy && name === 'type' && this.parent.node.name === 'input';
+            const dependencies = this.get_dependencies();
+            const value = this.get_value(block);
+            let updater;
+            const init = this.get_init(block, value);
+            if (is_legacy_input_type) {
+                block.chunks.hydrate.push(b `@set_input_type(${element.var}, ${init});`);
+                updater = b `@set_input_type(${element.var}, ${should_cache ? this.last : value});`;
+            }
+            else if (this.is_select_value_attribute) {
+                // annoying special case
+                const is_multiple_select = element.node.get_static_attribute_value('multiple');
+                if (is_multiple_select) {
+                    updater = b `@select_options(${element.var}, ${value});`;
+                }
+                else {
+                    updater = b `@select_option(${element.var}, ${value});`;
+                }
+                block.chunks.mount.push(b `
+				${updater}
+			`);
+            }
+            else if (this.is_src) {
+                block.chunks.hydrate.push(b `if (!@src_url_equal(${element.var}.src, ${init})) ${method}(${element.var}, "${name}", ${this.last});`);
+                updater = b `${method}(${element.var}, "${name}", ${should_cache ? this.last : value});`;
+            }
+            else if (property_name) {
+                block.chunks.hydrate.push(b `${element.var}.${property_name} = ${init};`);
+                updater = block.renderer.options.dev
+                    ? b `@prop_dev(${element.var}, "${property_name}", ${should_cache ? this.last : value});`
+                    : b `${element.var}.${property_name} = ${should_cache ? this.last : value};`;
+            }
+            else {
+                block.chunks.hydrate.push(b `${method}(${element.var}, "${name}", ${init});`);
+                updater = b `${method}(${element.var}, "${name}", ${should_cache ? this.last : value});`;
+            }
+            if (is_indirectly_bound_value) {
+                const update_value = b `${element.var}.value = ${element.var}.__value;`;
+                block.chunks.hydrate.push(update_value);
+                updater = b `
+				${updater}
+				${update_value};
+			`;
+            }
+            if (dependencies.length > 0) {
+                const condition = this.get_dom_update_conditions(block, block.renderer.dirty(dependencies));
+                block.chunks.update.push(b `
+				if (${condition}) {
+					${updater}
+				}`);
+            }
+            // special case – autofocus. has to be handled in a bit of a weird way
+            if (name === 'autofocus') {
+                block.autofocus = {
+                    element_var: element.var,
+                    condition_expression: this.node.is_true ? undefined : value
+                };
+            }
+        }
+        get_init(block, value) {
+            this.last = this.should_cache && block.get_unique_name(`${this.parent.var.name}_${this.name.replace(/[^a-zA-Z_$]/g, '_')}_value`);
+            if (this.should_cache)
+                block.add_variable(this.last);
+            return this.should_cache ? x `${this.last} = ${value}` : value;
+        }
+        get_dom_update_conditions(block, dependency_condition) {
+            const { property_name, should_cache, last } = this;
+            const element = this.parent;
+            const value = this.get_value(block);
+            let condition = dependency_condition;
+            if (should_cache) {
+                condition = this.is_src
+                    ? x `${condition} && (!@src_url_equal(${element.var}.src, (${last} = ${value})))`
+                    : x `${condition} && (${last} !== (${last} = ${value}))`;
+            }
+            if (this.is_input_value) {
+                const type = element.node.get_static_attribute_value('type');
+                if (type !== true && !non_textlike_input_types.has(type)) {
+                    condition = x `${condition} && ${element.var}.${property_name} !== ${should_cache ? last : value}`;
+                }
+            }
+            if (block.has_outros) {
+                condition = x `!#current || ${condition}`;
+            }
+            return condition;
+        }
+        get_dependencies() {
+            const node_dependencies = this.node.get_dependencies();
+            const dependencies = new Set(node_dependencies);
+            node_dependencies.forEach((prop) => {
+                const indirect_dependencies = this.parent.renderer.component.indirect_dependencies.get(prop);
+                if (indirect_dependencies) {
+                    indirect_dependencies.forEach(indirect_dependency => {
+                        dependencies.add(indirect_dependency);
+                    });
+                }
+            });
+            return Array.from(dependencies);
+        }
+        get_metadata() {
+            if (this.parent.node.namespace)
+                return null;
+            const metadata = attribute_lookup[this.name];
+            if (metadata && metadata.applies_to && !metadata.applies_to.includes(this.parent.node.name))
+                return null;
+            return metadata;
+        }
+        get_value(block) {
+            if (this.node.is_true) {
+                if (this.metadata && boolean_attribute.has(this.metadata.property_name.toLowerCase())) {
+                    return x `true`;
+                }
+                return x `""`;
+            }
+            if (this.node.chunks.length === 0)
+                return x `""`;
+            // TODO some of this code is repeated in Tag.ts — would be good to
+            // DRY it out if that's possible without introducing crazy indirection
+            if (this.node.chunks.length === 1) {
+                return this.node.chunks[0].type === 'Text'
+                    ? string_literal(this.node.chunks[0].data)
+                    : this.node.chunks[0].manipulate(block);
+            }
+            let value = this.node.name === 'class'
+                ? this.get_class_name_text(block)
+                : this.render_chunks(block).reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+            // '{foo} {bar}' — treat as string concatenation
+            if (this.node.chunks[0].type !== 'Text') {
+                value = x `"" + ${value}`;
+            }
+            return value;
+        }
+        get_class_name_text(block) {
+            const scoped_css = this.node.chunks.some((chunk) => chunk.synthetic);
+            const rendered = this.render_chunks(block);
+            if (scoped_css && rendered.length === 2) {
+                // we have a situation like class={possiblyUndefined}
+                rendered[0] = x `@null_to_empty(${rendered[0]})`;
+            }
+            return rendered.reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+        }
+        render_chunks(block) {
+            return this.node.chunks.map((chunk) => {
+                if (chunk.type === 'Text') {
+                    return string_literal(chunk.data);
+                }
+                return chunk.manipulate(block);
+            });
+        }
+        stringify() {
+            if (this.node.is_true)
+                return '';
+            const value = this.node.chunks;
+            if (value.length === 0)
+                return '=""';
+            return `="${value.map(chunk => {
+            return chunk.type === 'Text'
+                ? chunk.data.replace(/"/g, '\\"')
+                : `\${${chunk.manipulate()}}`;
+        }).join('')}"`;
+        }
+    }
     // source: https://html.spec.whatwg.org/multipage/indices.html
     const attribute_lookup = {
         allowfullscreen: { property_name: 'allowFullscreen', applies_to: ['iframe'] },
@@ -16097,15 +22896,7016 @@ var app = (function () {
         if (!metadata.property_name)
             metadata.property_name = name;
     });
+    // source: https://html.spec.whatwg.org/multipage/indices.html
+    const boolean_attribute = new Set([
+        'allowfullscreen',
+        'allowpaymentrequest',
+        'async',
+        'autofocus',
+        'autoplay',
+        'checked',
+        'controls',
+        'default',
+        'defer',
+        'disabled',
+        'formnovalidate',
+        'hidden',
+        'ismap',
+        'itemscope',
+        'loop',
+        'multiple',
+        'muted',
+        'nomodule',
+        'novalidate',
+        'open',
+        'playsinline',
+        'readonly',
+        'required',
+        'reversed',
+        'selected'
+    ]);
+    function should_cache(attribute) {
+        return attribute.is_src || attribute.node.should_cache();
+    }
+    function is_indirectly_bound_value(attribute) {
+        const element = attribute.parent;
+        return attribute.name === 'value' &&
+            (element.node.name === 'option' || // TODO check it's actually bound
+                (element.node.name === 'input' &&
+                    element.node.bindings.some((binding) => /checked|group/.test(binding.name))));
+    }
+
+    class StyleAttributeWrapper extends AttributeWrapper {
+        render(block) {
+            const style_props = optimize_style(this.node.chunks);
+            if (!style_props)
+                return super.render(block);
+            style_props.forEach((prop) => {
+                let value;
+                if (is_dynamic$1(prop.value)) {
+                    const prop_dependencies = new Set();
+                    value = prop.value
+                        .map(chunk => {
+                        if (chunk.type === 'Text') {
+                            return string_literal(chunk.data);
+                        }
+                        else {
+                            add_to_set(prop_dependencies, chunk.dynamic_dependencies());
+                            return chunk.manipulate(block);
+                        }
+                    })
+                        .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+                    // TODO is this necessary? style.setProperty always treats value as string, no?
+                    // if (prop.value.length === 1 || prop.value[0].type !== 'Text') {
+                    // 	value = x`"" + ${value}`;
+                    // }
+                    if (prop_dependencies.size) {
+                        let condition = block.renderer.dirty(Array.from(prop_dependencies));
+                        if (block.has_outros) {
+                            condition = x `!#current || ${condition}`;
+                        }
+                        const update = b `
+						if (${condition}) {
+							@set_style(${this.parent.var}, "${prop.key}", ${value}, ${prop.important ? 1 : null});
+						}`;
+                        block.chunks.update.push(update);
+                    }
+                }
+                else {
+                    value = string_literal(prop.value[0].data);
+                }
+                block.chunks.hydrate.push(b `@set_style(${this.parent.var}, "${prop.key}", ${value}, ${prop.important ? 1 : null});`);
+            });
+        }
+    }
+    function optimize_style(value) {
+        const props = [];
+        let chunks = value.slice();
+        while (chunks.length) {
+            const chunk = chunks[0];
+            if (chunk.type !== 'Text')
+                return null;
+            const key_match = /^\s*([\w-]+):\s*/.exec(chunk.data);
+            if (!key_match)
+                return null;
+            const key = key_match[1];
+            const offset = key_match.index + key_match[0].length;
+            const remaining_data = chunk.data.slice(offset);
+            if (remaining_data) {
+                chunks[0] = {
+                    start: chunk.start + offset,
+                    end: chunk.end,
+                    type: 'Text',
+                    data: remaining_data
+                };
+            }
+            else {
+                chunks.shift();
+            }
+            const result = get_style_value(chunks);
+            props.push({ key, value: result.value, important: result.important });
+            chunks = result.chunks;
+        }
+        return props;
+    }
+    function get_style_value(chunks) {
+        const value = [];
+        let in_url = false;
+        let quote_mark = null;
+        let escaped = false;
+        let closed = false;
+        while (chunks.length && !closed) {
+            const chunk = chunks.shift();
+            if (chunk.type === 'Text') {
+                let c = 0;
+                while (c < chunk.data.length) {
+                    const char = chunk.data[c];
+                    if (escaped) {
+                        escaped = false;
+                    }
+                    else if (char === '\\') {
+                        escaped = true;
+                    }
+                    else if (char === quote_mark) {
+                        quote_mark = null;
+                    }
+                    else if (char === '"' || char === "'") {
+                        quote_mark = char;
+                    }
+                    else if (char === ')' && in_url) {
+                        in_url = false;
+                    }
+                    else if (char === 'u' && chunk.data.slice(c, c + 4) === 'url(') {
+                        in_url = true;
+                    }
+                    else if (char === ';' && !in_url && !quote_mark) {
+                        closed = true;
+                        break;
+                    }
+                    c += 1;
+                }
+                if (c > 0) {
+                    value.push({
+                        type: 'Text',
+                        start: chunk.start,
+                        end: chunk.start + c,
+                        data: chunk.data.slice(0, c)
+                    });
+                }
+                while (/[;\s]/.test(chunk.data[c]))
+                    c += 1;
+                const remaining_data = chunk.data.slice(c);
+                if (remaining_data) {
+                    chunks.unshift({
+                        start: chunk.start + c,
+                        end: chunk.end,
+                        type: 'Text',
+                        data: remaining_data
+                    });
+                    break;
+                }
+            }
+            else {
+                value.push(chunk);
+            }
+        }
+        let important = false;
+        const last_chunk = value[value.length - 1];
+        if (last_chunk && last_chunk.type === 'Text' && /\s*!important\s*$/.test(last_chunk.data)) {
+            important = true;
+            last_chunk.data = last_chunk.data.replace(/\s*!important\s*$/, '');
+            if (!last_chunk.data)
+                value.pop();
+        }
+        return {
+            chunks,
+            value,
+            important
+        };
+    }
+    function is_dynamic$1(value) {
+        return value.length > 1 || value[0].type !== 'Text';
+    }
+
+    class SpreadAttributeWrapper extends BaseAttributeWrapper {
+    }
+
+    function mark_each_block_bindings(parent, binding) {
+        // we need to ensure that the each block creates a context including
+        // the list and the index, if they're not otherwise referenced
+        binding.expression.references.forEach(name => {
+            const each_block = parent.node.scope.get_owner(name);
+            if (each_block) {
+                each_block.has_binding = true;
+            }
+        });
+        if (binding.name === 'group') {
+            const add_index_binding = (name) => {
+                const each_block = parent.node.scope.get_owner(name);
+                if (each_block.type === 'EachBlock') {
+                    each_block.has_index_binding = true;
+                    for (const dep of each_block.expression.contextual_dependencies) {
+                        add_index_binding(dep);
+                    }
+                }
+            };
+            // for `<input bind:group={} >`, we make sure that all the each blocks creates context with `index`
+            for (const name of binding.expression.contextual_dependencies) {
+                add_index_binding(name);
+            }
+        }
+    }
+
+    class BindingWrapper {
+        constructor(block, node, parent) {
+            this.node = node;
+            this.parent = parent;
+            const { dependencies } = this.node.expression;
+            block.add_dependencies(dependencies);
+            // TODO does this also apply to e.g. `<input type='checkbox' bind:group='foo'>`?
+            handle_select_value_binding(this, dependencies);
+            if (node.is_contextual) {
+                mark_each_block_bindings(this.parent, this.node);
+            }
+            this.object = get_object(this.node.expression.node).name;
+            // view to model
+            this.handler = get_event_handler(this, parent.renderer, block, this.object, this.node.raw_expression);
+            this.snippet = this.node.expression.manipulate(block);
+            this.is_readonly = this.node.is_readonly;
+            this.needs_lock = this.node.name === 'currentTime'; // TODO others?
+        }
+        get_dependencies() {
+            const dependencies = new Set(this.node.expression.dependencies);
+            this.node.expression.dependencies.forEach((prop) => {
+                const indirect_dependencies = this.parent.renderer.component.indirect_dependencies.get(prop);
+                if (indirect_dependencies) {
+                    indirect_dependencies.forEach(indirect_dependency => {
+                        dependencies.add(indirect_dependency);
+                    });
+                }
+            });
+            return dependencies;
+        }
+        get_update_dependencies() {
+            const object = this.object;
+            const dependencies = new Set();
+            if (this.node.expression.template_scope.names.has(object)) {
+                this.node.expression.template_scope.dependencies_for_name
+                    .get(object)
+                    .forEach((name) => dependencies.add(name));
+            }
+            else {
+                dependencies.add(object);
+            }
+            const result = new Set(dependencies);
+            dependencies.forEach((dependency) => {
+                const indirect_dependencies = this.parent.renderer.component.indirect_dependencies.get(dependency);
+                if (indirect_dependencies) {
+                    indirect_dependencies.forEach(indirect_dependency => {
+                        result.add(indirect_dependency);
+                    });
+                }
+            });
+            return result;
+        }
+        is_readonly_media_attribute() {
+            return this.node.is_readonly_media_attribute();
+        }
+        render(block, lock) {
+            if (this.is_readonly)
+                return;
+            const { parent } = this;
+            const update_conditions = this.needs_lock ? [x `!${lock}`] : [];
+            const mount_conditions = [];
+            const dependency_array = Array.from(this.get_dependencies());
+            if (dependency_array.length > 0) {
+                update_conditions.push(block.renderer.dirty(dependency_array));
+            }
+            if (parent.node.name === 'input') {
+                const type = parent.node.get_static_attribute_value('type');
+                if (type === null ||
+                    type === '' ||
+                    type === 'text' ||
+                    type === 'email' ||
+                    type === 'password') {
+                    update_conditions.push(x `${parent.var}.${this.node.name} !== ${this.snippet}`);
+                }
+                else if (type === 'number') {
+                    update_conditions.push(x `@to_number(${parent.var}.${this.node.name}) !== ${this.snippet}`);
+                }
+            }
+            // model to view
+            let update_dom = get_dom_updater(parent, this);
+            let mount_dom = update_dom;
+            // special cases
+            switch (this.node.name) {
+                case 'group':
+                    {
+                        const { binding_group, is_context, contexts, index, keypath } = get_binding_group(parent.renderer, this.node, block);
+                        block.renderer.add_to_context('$$binding_groups');
+                        if (is_context && !block.binding_group_initialised.has(keypath)) {
+                            if (contexts.length > 1) {
+                                let binding_group = x `${block.renderer.reference('$$binding_groups')}[${index}]`;
+                                for (const name of contexts.slice(0, -1)) {
+                                    binding_group = x `${binding_group}[${block.renderer.reference(name)}]`;
+                                    block.chunks.init.push(b `${binding_group} = ${binding_group} || [];`);
+                                }
+                            }
+                            block.chunks.init.push(b `${binding_group(true)} = [];`);
+                            block.binding_group_initialised.add(keypath);
+                        }
+                        block.chunks.hydrate.push(b `${binding_group(true)}.push(${parent.var});`);
+                        block.chunks.destroy.push(b `${binding_group(true)}.splice(${binding_group(true)}.indexOf(${parent.var}), 1);`);
+                        break;
+                    }
+                case 'textContent':
+                    update_conditions.push(x `${this.snippet} !== ${parent.var}.textContent`);
+                    mount_conditions.push(x `${this.snippet} !== void 0`);
+                    break;
+                case 'innerHTML':
+                    update_conditions.push(x `${this.snippet} !== ${parent.var}.innerHTML`);
+                    mount_conditions.push(x `${this.snippet} !== void 0`);
+                    break;
+                case 'currentTime':
+                    update_conditions.push(x `!@_isNaN(${this.snippet})`);
+                    mount_dom = null;
+                    break;
+                case 'playbackRate':
+                case 'volume':
+                    update_conditions.push(x `!@_isNaN(${this.snippet})`);
+                    mount_conditions.push(x `!@_isNaN(${this.snippet})`);
+                    break;
+                case 'paused':
+                    {
+                        // this is necessary to prevent audio restarting by itself
+                        const last = block.get_unique_name(`${parent.var.name}_is_paused`);
+                        block.add_variable(last, x `true`);
+                        update_conditions.push(x `${last} !== (${last} = ${this.snippet})`);
+                        update_dom = b `${parent.var}[${last} ? "pause" : "play"]();`;
+                        mount_dom = null;
+                        break;
+                    }
+                case 'value':
+                    if (parent.node.get_static_attribute_value('type') === 'file') {
+                        update_dom = null;
+                        mount_dom = null;
+                    }
+            }
+            if (update_dom) {
+                if (update_conditions.length > 0) {
+                    const condition = update_conditions.reduce((lhs, rhs) => x `${lhs} && ${rhs}`);
+                    block.chunks.update.push(b `
+					if (${condition}) {
+						${update_dom}
+					}
+				`);
+                }
+                else {
+                    block.chunks.update.push(update_dom);
+                }
+            }
+            if (mount_dom) {
+                if (mount_conditions.length > 0) {
+                    const condition = mount_conditions.reduce((lhs, rhs) => x `${lhs} && ${rhs}`);
+                    block.chunks.mount.push(b `
+					if (${condition}) {
+						${mount_dom}
+					}
+				`);
+                }
+                else {
+                    block.chunks.mount.push(mount_dom);
+                }
+            }
+        }
+    }
+    function get_dom_updater(element, binding) {
+        const { node } = element;
+        if (binding.is_readonly_media_attribute()) {
+            return null;
+        }
+        if (binding.node.name === 'this') {
+            return null;
+        }
+        if (node.name === 'select') {
+            return node.get_static_attribute_value('multiple') === true ?
+                b `@select_options(${element.var}, ${binding.snippet})` :
+                b `@select_option(${element.var}, ${binding.snippet})`;
+        }
+        if (binding.node.name === 'group') {
+            const type = node.get_static_attribute_value('type');
+            const condition = type === 'checkbox'
+                ? x `~${binding.snippet}.indexOf(${element.var}.__value)`
+                : x `${element.var}.__value === ${binding.snippet}`;
+            return b `${element.var}.checked = ${condition};`;
+        }
+        if (binding.node.name === 'value') {
+            return b `@set_input_value(${element.var}, ${binding.snippet});`;
+        }
+        return b `${element.var}.${binding.node.name} = ${binding.snippet};`;
+    }
+    function get_binding_group(renderer, value, block) {
+        const { parts } = flatten_reference(value.raw_expression);
+        let keypath = parts.join('.');
+        const contexts = [];
+        const contextual_dependencies = new Set();
+        const { template_scope } = value.expression;
+        const add_contextual_dependency = (dep) => {
+            contextual_dependencies.add(dep);
+            const owner = template_scope.get_owner(dep);
+            if (owner.type === 'EachBlock') {
+                for (const dep of owner.expression.contextual_dependencies) {
+                    add_contextual_dependency(dep);
+                }
+            }
+        };
+        for (const dep of value.expression.contextual_dependencies) {
+            add_contextual_dependency(dep);
+        }
+        for (const dep of contextual_dependencies) {
+            const context = block.bindings.get(dep);
+            let key;
+            let name;
+            if (context) {
+                key = context.object.name;
+                name = context.property.name;
+            }
+            else {
+                key = dep;
+                name = dep;
+            }
+            keypath = `${key}@${keypath}`;
+            contexts.push(name);
+        }
+        if (!renderer.binding_groups.has(keypath)) {
+            const index = renderer.binding_groups.size;
+            contexts.forEach(context => {
+                renderer.add_to_context(context, true);
+            });
+            renderer.binding_groups.set(keypath, {
+                binding_group: (to_reference = false) => {
+                    let binding_group = '$$binding_groups';
+                    let _secondary_indexes = contexts;
+                    if (to_reference) {
+                        binding_group = block.renderer.reference(binding_group);
+                        _secondary_indexes = _secondary_indexes.map(name => block.renderer.reference(name));
+                    }
+                    if (_secondary_indexes.length > 0) {
+                        let obj = x `${binding_group}[${index}]`;
+                        _secondary_indexes.forEach(secondary_index => {
+                            obj = x `${obj}[${secondary_index}]`;
+                        });
+                        return obj;
+                    }
+                    else {
+                        return x `${binding_group}[${index}]`;
+                    }
+                },
+                is_context: contexts.length > 0,
+                contexts,
+                index,
+                keypath
+            });
+        }
+        return renderer.binding_groups.get(keypath);
+    }
+    function get_event_handler(binding, renderer, block, name, lhs) {
+        const contextual_dependencies = new Set(binding.node.expression.contextual_dependencies);
+        const context = block.bindings.get(name);
+        let set_store;
+        if (context) {
+            const { object, property, store, snippet } = context;
+            lhs = replace_object(lhs, snippet);
+            contextual_dependencies.add(object.name);
+            contextual_dependencies.add(property.name);
+            contextual_dependencies.delete(name);
+            if (store) {
+                set_store = b `${store}.set(${`$${store}`});`;
+            }
+        }
+        else {
+            const object = get_object(lhs);
+            if (object.name[0] === '$') {
+                const store = object.name.slice(1);
+                set_store = b `${store}.set(${object.name});`;
+            }
+        }
+        const value = get_value_from_dom(renderer, binding.parent, binding, block, contextual_dependencies);
+        const mutation = b `
+		${lhs} = ${value};
+		${set_store}
+	`;
+        return {
+            uses_context: binding.node.is_contextual || binding.node.expression.uses_context,
+            mutation,
+            contextual_dependencies,
+            lhs
+        };
+    }
+    function get_value_from_dom(renderer, element, binding, block, contextual_dependencies) {
+        const { node } = element;
+        const { name } = binding.node;
+        if (name === 'this') {
+            return x `$$value`;
+        }
+        // <select bind:value='selected>
+        if (node.name === 'select') {
+            return node.get_static_attribute_value('multiple') === true ?
+                x `@select_multiple_value(this)` :
+                x `@select_value(this)`;
+        }
+        const type = node.get_static_attribute_value('type');
+        // <input type='checkbox' bind:group='foo'>
+        if (name === 'group') {
+            if (type === 'checkbox') {
+                const { binding_group, contexts } = get_binding_group(renderer, binding.node, block);
+                add_to_set(contextual_dependencies, contexts);
+                return x `@get_binding_group_value(${binding_group()}, this.__value, this.checked)`;
+            }
+            return x `this.__value`;
+        }
+        // <input type='range|number' bind:value>
+        if (type === 'range' || type === 'number') {
+            return x `@to_number(this.${name})`;
+        }
+        if ((name === 'buffered' || name === 'seekable' || name === 'played')) {
+            return x `@time_ranges_to_array(this.${name})`;
+        }
+        // everything else
+        return x `this.${name}`;
+    }
+
+    function compare_node(a, b) {
+        if (a === b)
+            return true;
+        if (!a || !b)
+            return false;
+        if (a.type !== b.type)
+            return false;
+        switch (a.type) {
+            case 'Identifier':
+                return a.name === b.name;
+            case 'MemberExpression':
+                return (compare_node(a.object, b.object) &&
+                    compare_node(a.property, b.property) &&
+                    a.computed === b.computed);
+            case 'Literal':
+                return a.value === b.value;
+        }
+    }
+
+    function bind_this(component, block, binding, variable) {
+        const fn = component.get_unique_name(`${variable.name}_binding`);
+        block.renderer.add_to_context(fn.name);
+        const callee = block.renderer.reference(fn.name);
+        const { contextual_dependencies, mutation } = binding.handler;
+        const dependencies = binding.get_update_dependencies();
+        const body = b `
+		${mutation}
+		${Array.from(dependencies)
+        .filter(dep => dep[0] !== '$')
+        .filter(dep => !contextual_dependencies.has(dep))
+        .map(dep => b `${block.renderer.invalidate(dep)};`)}
+	`;
+        if (contextual_dependencies.size) {
+            const params = Array.from(contextual_dependencies).map(name => ({
+                type: 'Identifier',
+                name
+            }));
+            component.partly_hoisted.push(b `
+			function ${fn}($$value, ${params}) {
+				@binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+					${body}
+				});
+			}
+		`);
+            const alias_map = new Map();
+            const args = [];
+            for (let id of params) {
+                const value = block.renderer.reference(id.name);
+                let found = false;
+                if (block.variables.has(id.name)) {
+                    let alias = id.name;
+                    for (let i = 1; block.variables.has(alias) && !compare_node(block.variables.get(alias).init, value); alias = `${id.name}_${i++}`)
+                        ;
+                    alias_map.set(alias, id.name);
+                    id = { type: 'Identifier', name: alias };
+                    found = block.variables.has(alias);
+                }
+                args.push(id);
+                if (!found) {
+                    block.add_variable(id, value);
+                }
+            }
+            const assign = block.get_unique_name(`assign_${variable.name}`);
+            const unassign = block.get_unique_name(`unassign_${variable.name}`);
+            block.chunks.init.push(b `
+			const ${assign} = () => ${callee}(${variable}, ${args});
+			const ${unassign} = () => ${callee}(null, ${args});
+		`);
+            const condition = Array.from(args)
+                .map(name => x `${name} !== ${block.renderer.reference(alias_map.get(name.name) || name.name)}`)
+                .reduce((lhs, rhs) => x `${lhs} || ${rhs}`);
+            // we push unassign and unshift assign so that references are
+            // nulled out before they're created, to avoid glitches
+            // with shifting indices
+            block.chunks.update.push(b `
+			if (${condition}) {
+				${unassign}();
+				${args.map(a => b `${a} = ${block.renderer.reference(alias_map.get(a.name) || a.name)}`)};
+				${assign}();
+			}`);
+            block.chunks.destroy.push(b `${unassign}();`);
+            return b `${assign}();`;
+        }
+        component.partly_hoisted.push(b `
+		function ${fn}($$value) {
+			@binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+				${body}
+			});
+		}
+	`);
+        block.chunks.destroy.push(b `${callee}(null);`);
+        return b `${callee}(${variable});`;
+    }
+
+    class Tag$1 extends Wrapper {
+        constructor(renderer, block, parent, node) {
+            super(renderer, block, parent, node);
+            this.cannot_use_innerhtml();
+            if (!this.is_dependencies_static()) {
+                this.not_static_content();
+            }
+            block.add_dependencies(node.expression.dependencies);
+        }
+        is_dependencies_static() {
+            return this.node.expression.contextual_dependencies.size === 0 && this.node.expression.dynamic_dependencies().length === 0;
+        }
+        rename_this_method(block, update) {
+            const dependencies = this.node.expression.dynamic_dependencies();
+            let snippet = this.node.expression.manipulate(block);
+            const value = this.node.should_cache && block.get_unique_name(`${this.var.name}_value`);
+            const content = this.node.should_cache ? value : snippet;
+            snippet = x `${snippet} + ""`;
+            if (this.node.should_cache)
+                block.add_variable(value, snippet); // TODO may need to coerce snippet to string
+            if (dependencies.length > 0) {
+                let condition = block.renderer.dirty(dependencies);
+                if (block.has_outros) {
+                    condition = x `!#current || ${condition}`;
+                }
+                const update_cached_value = x `${value} !== (${value} = ${snippet})`;
+                if (this.node.should_cache) {
+                    condition = x `${condition} && ${update_cached_value}`;
+                }
+                block.chunks.update.push(b `if (${condition}) ${update(content)}`);
+            }
+            return { init: content };
+        }
+    }
+
+    class MustacheTagWrapper extends Tag$1 {
+        constructor(renderer, block, parent, node) {
+            super(renderer, block, parent, node);
+            this.var = { type: 'Identifier', name: 't' };
+        }
+        render(block, parent_node, parent_nodes) {
+            const { init } = this.rename_this_method(block, value => x `@set_data(${this.var}, ${value})`);
+            block.add_element(this.var, x `@text(${init})`, parent_nodes && x `@claim_text(${parent_nodes}, ${init})`, parent_node);
+        }
+    }
+
+    class RawMustacheTagWrapper extends Tag$1 {
+        constructor(renderer, block, parent, node) {
+            super(renderer, block, parent, node);
+            this.var = { type: 'Identifier', name: 'raw' };
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+        }
+        render(block, parent_node, _parent_nodes) {
+            const in_head = is_head(parent_node);
+            const can_use_innerhtml = !in_head && parent_node && !this.prev && !this.next;
+            if (can_use_innerhtml) {
+                const insert = content => b `${parent_node}.innerHTML = ${content};`[0];
+                const { init } = this.rename_this_method(block, content => insert(content));
+                block.chunks.mount.push(insert(init));
+            }
+            else {
+                const needs_anchor = in_head || (this.next ? !this.next.is_dom_node() : (!this.parent || !this.parent.is_dom_node()));
+                const html_tag = block.get_unique_name('html_tag');
+                const html_anchor = needs_anchor && block.get_unique_name('html_anchor');
+                block.add_variable(html_tag);
+                const { init } = this.rename_this_method(block, content => x `${html_tag}.p(${content})`);
+                const update_anchor = needs_anchor ? html_anchor : this.next ? this.next.var : 'null';
+                const parent_element = this.node.find_nearest(/^Element/);
+                const is_svg = parent_element && parent_element.namespace === namespaces.svg;
+                block.chunks.create.push(b `${html_tag} = new @HtmlTag(${is_svg ? 'true' : 'false'});`);
+                if (this.renderer.options.hydratable) {
+                    block.chunks.claim.push(b `${html_tag} = @claim_html_tag(${_parent_nodes}, ${is_svg ? 'true' : 'false'});`);
+                }
+                block.chunks.hydrate.push(b `${html_tag}.a = ${update_anchor};`);
+                block.chunks.mount.push(b `${html_tag}.m(${init}, ${parent_node || '#target'}, ${parent_node ? null : '#anchor'});`);
+                if (needs_anchor) {
+                    block.add_element(html_anchor, x `@empty()`, x `@empty()`, parent_node);
+                }
+                if (!parent_node || in_head) {
+                    block.chunks.destroy.push(b `if (detaching) ${html_tag}.d();`);
+                }
+            }
+        }
+    }
+
+    const events = [
+        {
+            event_names: ['input'],
+            filter: (node, _name) => node.name === 'textarea' ||
+                node.name === 'input' && !/radio|checkbox|range|file/.test(node.get_static_attribute_value('type'))
+        },
+        {
+            event_names: ['input'],
+            filter: (node, name) => (name === 'textContent' || name === 'innerHTML') &&
+                node.attributes.some(attribute => attribute.name === 'contenteditable')
+        },
+        {
+            event_names: ['change'],
+            filter: (node, _name) => node.name === 'select' ||
+                node.name === 'input' && /radio|checkbox|file/.test(node.get_static_attribute_value('type'))
+        },
+        {
+            event_names: ['change', 'input'],
+            filter: (node, _name) => node.name === 'input' && node.get_static_attribute_value('type') === 'range'
+        },
+        {
+            event_names: ['elementresize'],
+            filter: (_node, name) => dimensions.test(name)
+        },
+        // media events
+        {
+            event_names: ['timeupdate'],
+            filter: (node, name) => node.is_media_node() &&
+                (name === 'currentTime' || name === 'played' || name === 'ended')
+        },
+        {
+            event_names: ['durationchange'],
+            filter: (node, name) => node.is_media_node() &&
+                name === 'duration'
+        },
+        {
+            event_names: ['play', 'pause'],
+            filter: (node, name) => node.is_media_node() &&
+                name === 'paused'
+        },
+        {
+            event_names: ['progress'],
+            filter: (node, name) => node.is_media_node() &&
+                name === 'buffered'
+        },
+        {
+            event_names: ['loadedmetadata'],
+            filter: (node, name) => node.is_media_node() &&
+                (name === 'buffered' || name === 'seekable')
+        },
+        {
+            event_names: ['volumechange'],
+            filter: (node, name) => node.is_media_node() &&
+                (name === 'volume' || name === 'muted')
+        },
+        {
+            event_names: ['ratechange'],
+            filter: (node, name) => node.is_media_node() &&
+                name === 'playbackRate'
+        },
+        {
+            event_names: ['seeking', 'seeked'],
+            filter: (node, name) => node.is_media_node() &&
+                (name === 'seeking')
+        },
+        {
+            event_names: ['ended'],
+            filter: (node, name) => node.is_media_node() &&
+                name === 'ended'
+        },
+        {
+            event_names: ['resize'],
+            filter: (node, name) => node.is_media_node() &&
+                (name === 'videoHeight' || name === 'videoWidth')
+        },
+        // details event
+        {
+            event_names: ['toggle'],
+            filter: (node, _name) => node.name === 'details'
+        }
+    ];
+    const CHILD_DYNAMIC_ELEMENT_BLOCK = 'child_dynamic_element';
+    class ElementWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.child_dynamic_element_block = null;
+            this.child_dynamic_element = null;
+            if (node.is_dynamic_element && block.type !== CHILD_DYNAMIC_ELEMENT_BLOCK) {
+                this.child_dynamic_element_block = block.child({
+                    comment: create_debugging_comment(node, renderer.component),
+                    name: renderer.component.get_unique_name('create_dynamic_element'),
+                    type: CHILD_DYNAMIC_ELEMENT_BLOCK
+                });
+                renderer.blocks.push(this.child_dynamic_element_block);
+                this.child_dynamic_element = new ElementWrapper(renderer, this.child_dynamic_element_block, parent, node, strip_whitespace, next_sibling);
+            }
+            this.var = {
+                type: 'Identifier',
+                name: node.name.replace(/[^a-zA-Z0-9_$]/g, '_')
+            };
+            this.void = is_void(node.name);
+            this.class_dependencies = [];
+            if (this.node.children.length) {
+                this.node.lets.forEach(l => {
+                    extract_names(l.value || l.name).forEach(name => {
+                        renderer.add_to_context(name, true);
+                    });
+                });
+            }
+            this.attributes = this.node.attributes.map(attribute => {
+                if (attribute.name === 'style') {
+                    return new StyleAttributeWrapper(this, block, attribute);
+                }
+                if (attribute.type === 'Spread') {
+                    return new SpreadAttributeWrapper(this, block, attribute);
+                }
+                return new AttributeWrapper(this, block, attribute);
+            });
+            // ordinarily, there'll only be one... but we need to handle
+            // the rare case where an element can have multiple bindings,
+            // e.g. <audio bind:paused bind:currentTime>
+            this.bindings = this.node.bindings.map(binding => new BindingWrapper(block, binding, this));
+            this.event_handlers = this.node.handlers.map(event_handler => new EventHandlerWrapper(event_handler, this));
+            if (node.intro || node.outro) {
+                if (node.intro)
+                    block.add_intro(node.intro.is_local);
+                if (node.outro)
+                    block.add_outro(node.outro.is_local);
+            }
+            if (node.animation) {
+                block.add_animation();
+            }
+            block.add_dependencies(node.tag_expr.dependencies);
+            // add directive and handler dependencies
+            [node.animation, node.outro, ...node.actions, ...node.classes, ...node.styles].forEach(directive => {
+                if (directive && directive.expression) {
+                    block.add_dependencies(directive.expression.dependencies);
+                }
+            });
+            node.handlers.forEach(handler => {
+                if (handler.expression) {
+                    block.add_dependencies(handler.expression.dependencies);
+                }
+            });
+            if (this.parent) {
+                if (node.actions.length > 0 ||
+                    node.animation ||
+                    node.bindings.length > 0 ||
+                    node.classes.length > 0 ||
+                    node.intro || node.outro ||
+                    node.handlers.length > 0 ||
+                    node.styles.length > 0 ||
+                    this.node.name === 'option' ||
+                    node.tag_expr.dynamic_dependencies().length ||
+                    renderer.options.dev) {
+                    this.parent.cannot_use_innerhtml(); // need to use add_location
+                    this.parent.not_static_content();
+                }
+            }
+            this.fragment = new FragmentWrapper(renderer, block, node.children, this, strip_whitespace, next_sibling);
+        }
+        render(block, parent_node, parent_nodes) {
+            if (this.child_dynamic_element) {
+                this.render_dynamic_element(block, parent_node, parent_nodes);
+            }
+            else {
+                this.render_element(block, parent_node, parent_nodes);
+            }
+        }
+        render_dynamic_element(block, parent_node, parent_nodes) {
+            this.child_dynamic_element.render(this.child_dynamic_element_block, null, x `#nodes`);
+            const previous_tag = block.get_unique_name('previous_tag');
+            const tag = this.node.tag_expr.manipulate(block);
+            block.add_variable(previous_tag, tag);
+            block.chunks.init.push(b `
+			${this.renderer.options.dev && b `@validate_dynamic_element(${tag});`}
+			${this.renderer.options.dev && this.node.children.length > 0 && b `@validate_void_dynamic_element(${tag});`}
+			let ${this.var} = ${tag} && ${this.child_dynamic_element_block.name}(#ctx);
+		`);
+            block.chunks.create.push(b `
+			if (${this.var}) ${this.var}.c();
+		`);
+            if (this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `
+				if (${this.var}) ${this.var}.l(${parent_nodes});
+			`);
+            }
+            block.chunks.mount.push(b `
+			if (${this.var}) ${this.var}.m(${parent_node || '#target'}, ${parent_node ? 'null' : '#anchor'});
+		`);
+            const anchor = this.get_or_create_anchor(block, parent_node, parent_nodes);
+            const has_transitions = !!(this.node.intro || this.node.outro);
+            const not_equal = this.renderer.component.component_options.immutable ? x `@not_equal` : x `@safe_not_equal`;
+            block.chunks.update.push(b `
+			if (${tag}) {
+				if (!${previous_tag}) {
+					${this.var} = ${this.child_dynamic_element_block.name}(#ctx);
+					${this.var}.c();
+					${has_transitions && b `@transition_in(${this.var})`}
+					${this.var}.m(${this.get_update_mount_node(anchor)}, ${anchor});
+				} else if (${not_equal}(${previous_tag}, ${tag})) {
+					${this.var}.d(1);
+					${this.renderer.options.dev && b `@validate_dynamic_element(${tag});`}
+					${this.renderer.options.dev && this.node.children.length > 0 && b `@validate_void_dynamic_element(${tag});`}
+					${this.var} = ${this.child_dynamic_element_block.name}(#ctx);
+					${this.var}.c();
+					${this.var}.m(${this.get_update_mount_node(anchor)}, ${anchor});
+				} else {
+					${this.var}.p(#ctx, #dirty);
+				}
+			} else if (${previous_tag}) {
+				${has_transitions
+            ? b `
+							@group_outros();
+							@transition_out(${this.var}, 1, 1, () => {
+								${this.var} = null;
+							});
+							@check_outros();
+						`
+            : b `
+							${this.var}.d(1);
+							${this.var} = null;
+						`}
+			}
+			${previous_tag} = ${tag};
+		`);
+            if (this.child_dynamic_element_block.has_intros) {
+                block.chunks.intro.push(b `@transition_in(${this.var});`);
+            }
+            if (this.child_dynamic_element_block.has_outros) {
+                block.chunks.outro.push(b `@transition_out(${this.var});`);
+            }
+            block.chunks.destroy.push(b `if (${this.var}) ${this.var}.d(detaching)`);
+            if (this.node.animation) {
+                const measurements = block.get_unique_name('measurements');
+                block.add_variable(measurements);
+                block.chunks.measure.push(b `${measurements} = ${this.var}.r()`);
+                block.chunks.fix.push(b `${this.var}.f();`);
+                block.chunks.animate.push(b `
+				${this.var}.s(${measurements});
+				${this.var}.a()
+			`);
+            }
+        }
+        is_dom_node() {
+            return super.is_dom_node() && !this.child_dynamic_element;
+        }
+        render_element(block, parent_node, parent_nodes) {
+            const { renderer } = this;
+            if (this.node.name === 'noscript')
+                return;
+            const node = this.var;
+            const nodes = parent_nodes && block.get_unique_name(`${this.var.name}_nodes`); // if we're in unclaimable territory, i.e. <head>, parent_nodes is null
+            const children = x `@children(${this.node.name === 'template' ? x `${node}.content` : node})`;
+            block.add_variable(node);
+            const render_statement = this.get_render_statement(block);
+            block.chunks.create.push(b `${node} = ${render_statement};`);
+            if (renderer.options.hydratable) {
+                if (parent_nodes) {
+                    block.chunks.claim.push(b `
+					${node} = ${this.get_claim_statement(block, parent_nodes)};
+				`);
+                    if (!this.void && this.node.children.length > 0) {
+                        block.chunks.claim.push(b `
+						var ${nodes} = ${children};
+					`);
+                    }
+                }
+                else {
+                    block.chunks.claim.push(b `${node} = ${render_statement};`);
+                }
+            }
+            if (parent_node) {
+                const append = b `@append(${parent_node}, ${node});`;
+                append[0].expression.callee.loc = {
+                    start: this.renderer.locate(this.node.start),
+                    end: this.renderer.locate(this.node.end)
+                };
+                block.chunks.mount.push(append);
+                if (is_head(parent_node)) {
+                    block.chunks.destroy.push(b `@detach(${node});`);
+                }
+            }
+            else {
+                const insert = b `@insert(#target, ${node}, #anchor);`;
+                insert[0].expression.callee.loc = {
+                    start: this.renderer.locate(this.node.start),
+                    end: this.renderer.locate(this.node.end)
+                };
+                block.chunks.mount.push(insert);
+                // TODO we eventually need to consider what happens to elements
+                // that belong to the same outgroup as an outroing element...
+                block.chunks.destroy.push(b `if (detaching) @detach(${node});`);
+            }
+            // insert static children with textContent or innerHTML
+            // skip textcontent for <template>.  append nodes to TemplateElement.content instead
+            const can_use_textcontent = this.can_use_textcontent();
+            const is_template = this.node.name === 'template';
+            const is_template_with_text_content = is_template && can_use_textcontent;
+            if (!is_template_with_text_content && !this.node.namespace && (this.can_use_innerhtml || can_use_textcontent) && this.fragment.nodes.length > 0) {
+                if (this.fragment.nodes.length === 1 && this.fragment.nodes[0].node.type === 'Text') {
+                    block.chunks.create.push(b `${node}.textContent = ${string_literal(this.fragment.nodes[0].data)};`);
+                }
+                else {
+                    const state = {
+                        quasi: {
+                            type: 'TemplateElement',
+                            value: { raw: '' }
+                        }
+                    };
+                    const literal = {
+                        type: 'TemplateLiteral',
+                        expressions: [],
+                        quasis: []
+                    };
+                    const can_use_raw_text = !this.can_use_innerhtml && can_use_textcontent;
+                    to_html(this.fragment.nodes, block, literal, state, can_use_raw_text);
+                    literal.quasis.push(state.quasi);
+                    block.chunks.create.push(b `${node}.${this.can_use_innerhtml ? 'innerHTML' : 'textContent'} = ${literal};`);
+                }
+            }
+            else {
+                this.fragment.nodes.forEach((child) => {
+                    child.render(block, is_template ? x `${node}.content` : node, nodes);
+                });
+            }
+            const event_handler_or_binding_uses_context = (this.bindings.some(binding => binding.handler.uses_context) ||
+                this.node.handlers.some(handler => handler.uses_context) ||
+                this.node.actions.some(action => action.uses_context));
+            if (event_handler_or_binding_uses_context) {
+                block.maintain_context = true;
+            }
+            this.add_attributes(block);
+            this.add_directives_in_order(block);
+            this.add_transitions(block);
+            this.add_animation(block);
+            this.add_classes(block);
+            this.add_styles(block);
+            this.add_manual_style_scoping(block);
+            if (nodes && this.renderer.options.hydratable && !this.void) {
+                block.chunks.claim.push(b `${this.node.children.length > 0 ? nodes : children}.forEach(@detach);`);
+            }
+            if (renderer.options.dev) {
+                const loc = renderer.locate(this.node.start);
+                block.chunks.hydrate.push(b `@add_location(${this.var}, ${renderer.file_var}, ${loc.line - 1}, ${loc.column}, ${this.node.start});`);
+            }
+            block.renderer.dirty(this.node.tag_expr.dynamic_dependencies());
+        }
+        can_use_textcontent() {
+            return this.is_static_content && this.fragment.nodes.every(node => node.node.type === 'Text' || node.node.type === 'MustacheTag');
+        }
+        get_render_statement(block) {
+            const { name, namespace, tag_expr } = this.node;
+            if (namespace === namespaces.svg) {
+                return x `@svg_element("${name}")`;
+            }
+            if (namespace) {
+                return x `@_document.createElementNS("${namespace}", "${name}")`;
+            }
+            const is = this.attributes.find(attr => attr.node.name === 'is');
+            if (is) {
+                return x `@element_is("${name}", ${is.render_chunks(block).reduce((lhs, rhs) => x `${lhs} + ${rhs}`)})`;
+            }
+            const reference = tag_expr.manipulate(block);
+            return x `@element(${reference})`;
+        }
+        get_claim_statement(block, nodes) {
+            const attributes = this.attributes
+                .filter((attr) => !(attr instanceof SpreadAttributeWrapper) && !attr.property_name)
+                .map((attr) => p `${attr.name}: true`);
+            let reference;
+            if (this.node.tag_expr.node.type === 'Literal') {
+                if (this.node.namespace) {
+                    reference = `"${this.node.tag_expr.node.value}"`;
+                }
+                else {
+                    reference = `"${(this.node.tag_expr.node.value || '').toUpperCase()}"`;
+                }
+            }
+            else if (this.node.namespace) {
+                reference = x `${this.node.tag_expr.manipulate(block)}`;
+            }
+            else {
+                reference = x `(${this.node.tag_expr.manipulate(block)} || 'null').toUpperCase()`;
+            }
+            if (this.node.namespace === namespaces.svg) {
+                return x `@claim_svg_element(${nodes}, ${reference}, { ${attributes} })`;
+            }
+            else {
+                return x `@claim_element(${nodes}, ${reference}, { ${attributes} })`;
+            }
+        }
+        add_directives_in_order(block) {
+            const binding_groups = events
+                .map(event => ({
+                events: event.event_names,
+                bindings: this.bindings
+                    .filter(binding => binding.node.name !== 'this')
+                    .filter(binding => event.filter(this.node, binding.node.name))
+            }))
+                .filter(group => group.bindings.length);
+            const this_binding = this.bindings.find(b => b.node.name === 'this');
+            function getOrder(item) {
+                if (item instanceof EventHandlerWrapper) {
+                    return item.node.start;
+                }
+                else if (item instanceof BindingWrapper) {
+                    return item.node.start;
+                }
+                else if (item instanceof Action) {
+                    return item.start;
+                }
+                else {
+                    return item.bindings[0].node.start;
+                }
+            }
+            [
+                ...binding_groups,
+                ...this.event_handlers,
+                this_binding,
+                ...this.node.actions
+            ]
+                .filter(Boolean)
+                .sort((a, b) => getOrder(a) - getOrder(b))
+                .forEach(item => {
+                if (item instanceof EventHandlerWrapper) {
+                    add_event_handler(block, this.var, item);
+                }
+                else if (item instanceof BindingWrapper) {
+                    this.add_this_binding(block, item);
+                }
+                else if (item instanceof Action) {
+                    add_action(block, this.var, item);
+                }
+                else {
+                    this.add_bindings(block, item);
+                }
+            });
+        }
+        add_bindings(block, binding_group) {
+            const { renderer } = this;
+            if (binding_group.bindings.length === 0)
+                return;
+            renderer.component.has_reactive_assignments = true;
+            const lock = binding_group.bindings.some(binding => binding.needs_lock) ?
+                block.get_unique_name(`${this.var.name}_updating`) :
+                null;
+            if (lock)
+                block.add_variable(lock, x `false`);
+            const handler = renderer.component.get_unique_name(`${this.var.name}_${binding_group.events.join('_')}_handler`);
+            renderer.add_to_context(handler.name);
+            // TODO figure out how to handle locks
+            const needs_lock = binding_group.bindings.some(binding => binding.needs_lock);
+            const dependencies = new Set();
+            const contextual_dependencies = new Set();
+            binding_group.bindings.forEach(binding => {
+                // TODO this is a mess
+                add_to_set(dependencies, binding.get_update_dependencies());
+                add_to_set(contextual_dependencies, binding.handler.contextual_dependencies);
+                binding.render(block, lock);
+            });
+            // media bindings — awkward special case. The native timeupdate events
+            // fire too infrequently, so we need to take matters into our
+            // own hands
+            let animation_frame;
+            if (binding_group.events[0] === 'timeupdate') {
+                animation_frame = block.get_unique_name(`${this.var.name}_animationframe`);
+                block.add_variable(animation_frame);
+            }
+            const has_local_function = contextual_dependencies.size > 0 || needs_lock || animation_frame;
+            let callee = renderer.reference(handler);
+            // TODO dry this out — similar code for event handlers and component bindings
+            if (has_local_function) {
+                const args = Array.from(contextual_dependencies).map(name => renderer.reference(name));
+                // need to create a block-local function that calls an instance-level function
+                if (animation_frame) {
+                    block.chunks.init.push(b `
+					function ${handler}() {
+						@_cancelAnimationFrame(${animation_frame});
+						if (!${this.var}.paused) {
+							${animation_frame} = @raf(${handler});
+							${needs_lock && b `${lock} = true;`}
+						}
+						${callee}.call(${this.var}, ${args});
+					}
+				`);
+                }
+                else {
+                    block.chunks.init.push(b `
+					function ${handler}() {
+						${needs_lock && b `${lock} = true;`}
+						${callee}.call(${this.var}, ${args});
+					}
+				`);
+                }
+                callee = handler;
+            }
+            const params = Array.from(contextual_dependencies).map(name => ({
+                type: 'Identifier',
+                name
+            }));
+            this.renderer.component.partly_hoisted.push(b `
+			function ${handler}(${params}) {
+				${binding_group.bindings.map(b => b.handler.mutation)}
+				${Array.from(dependencies)
+            .filter(dep => dep[0] !== '$')
+            .filter(dep => !contextual_dependencies.has(dep))
+            .map(dep => b `${this.renderer.invalidate(dep)};`)}
+			}
+		`);
+            binding_group.events.forEach(name => {
+                if (name === 'elementresize') {
+                    // special case
+                    const resize_listener = block.get_unique_name(`${this.var.name}_resize_listener`);
+                    block.add_variable(resize_listener);
+                    block.chunks.mount.push(b `${resize_listener} = @add_resize_listener(${this.var}, ${callee}.bind(${this.var}));`);
+                    block.chunks.destroy.push(b `${resize_listener}();`);
+                }
+                else {
+                    block.event_listeners.push(x `@listen(${this.var}, "${name}", ${callee})`);
+                }
+            });
+            const some_initial_state_is_undefined = binding_group.bindings
+                .map(binding => x `${binding.snippet} === void 0`)
+                .reduce((lhs, rhs) => x `${lhs} || ${rhs}`);
+            const should_initialise = (this.node.name === 'select' ||
+                binding_group.bindings.find(binding => {
+                    return (binding.node.name === 'indeterminate' ||
+                        binding.node.name === 'textContent' ||
+                        binding.node.name === 'innerHTML' ||
+                        binding.is_readonly_media_attribute());
+                }));
+            if (should_initialise) {
+                const callback = has_local_function ? handler : x `() => ${callee}.call(${this.var})`;
+                block.chunks.hydrate.push(b `if (${some_initial_state_is_undefined}) @add_render_callback(${callback});`);
+            }
+            if (binding_group.events[0] === 'elementresize') {
+                block.chunks.hydrate.push(b `@add_render_callback(() => ${callee}.call(${this.var}));`);
+            }
+            if (lock) {
+                block.chunks.update.push(b `${lock} = false;`);
+            }
+        }
+        add_this_binding(block, this_binding) {
+            const { renderer } = this;
+            renderer.component.has_reactive_assignments = true;
+            const binding_callback = bind_this(renderer.component, block, this_binding, this.var);
+            block.chunks.mount.push(binding_callback);
+        }
+        add_attributes(block) {
+            // Get all the class dependencies first
+            this.attributes.forEach((attribute) => {
+                if (attribute.node.name === 'class') {
+                    const dependencies = attribute.node.get_dependencies();
+                    push_array$1(this.class_dependencies, dependencies);
+                }
+            });
+            if (this.node.attributes.some(attr => attr.is_spread) || this.node.is_dynamic_element) {
+                this.add_spread_attributes(block);
+                return;
+            }
+            this.attributes.forEach((attribute) => {
+                attribute.render(block);
+            });
+        }
+        add_spread_attributes(block) {
+            const levels = block.get_unique_name(`${this.var.name}_levels`);
+            const data = block.get_unique_name(`${this.var.name}_data`);
+            const initial_props = [];
+            const updates = [];
+            this.attributes
+                .forEach(attr => {
+                const dependencies = attr.node.get_dependencies();
+                const condition = dependencies.length > 0
+                    ? block.renderer.dirty(dependencies)
+                    : null;
+                if (attr instanceof SpreadAttributeWrapper) {
+                    const snippet = attr.node.expression.manipulate(block);
+                    initial_props.push(snippet);
+                    updates.push(condition ? x `${condition} && ${snippet}` : snippet);
+                }
+                else {
+                    const name = attr.property_name || attr.name;
+                    initial_props.push(x `{ ${name}: ${attr.get_init(block, attr.get_value(block))} }`);
+                    const snippet = x `{ ${name}: ${attr.should_cache ? attr.last : attr.get_value(block)} }`;
+                    updates.push(condition ? x `${attr.get_dom_update_conditions(block, condition)} && ${snippet}` : snippet);
+                }
+            });
+            block.chunks.init.push(b `
+			let ${levels} = [${initial_props}];
+
+			let ${data} = {};
+			for (let #i = 0; #i < ${levels}.length; #i += 1) {
+				${data} = @assign(${data}, ${levels}[#i]);
+			}
+		`);
+            const fn = this.node.namespace === namespaces.svg ? x `@set_svg_attributes` : x `@set_attributes`;
+            block.chunks.hydrate.push(b `${fn}(${this.var}, ${data});`);
+            block.chunks.update.push(b `
+			${fn}(${this.var}, ${data} = @get_spread_update(${levels}, [
+				${updates}
+			]));
+		`);
+            // handle edge cases for elements
+            if (this.node.name === 'select') {
+                const dependencies = new Set();
+                for (const attr of this.attributes) {
+                    for (const dep of attr.node.dependencies) {
+                        dependencies.add(dep);
+                    }
+                }
+                block.chunks.mount.push(b `
+				(${data}.multiple ? @select_options : @select_option)(${this.var}, ${data}.value);
+			`);
+                block.chunks.update.push(b `
+				if (${block.renderer.dirty(Array.from(dependencies))} && 'value' in ${data}) (${data}.multiple ? @select_options : @select_option)(${this.var}, ${data}.value);;
+			`);
+            }
+            else if (this.node.name === 'input' && this.attributes.find(attr => attr.node.name === 'value')) {
+                const type = this.node.get_static_attribute_value('type');
+                if (type === null || type === '' || type === 'text' || type === 'email' || type === 'password') {
+                    block.chunks.mount.push(b `
+					${this.var}.value = ${data}.value;
+				`);
+                    block.chunks.update.push(b `
+					if ('value' in ${data}) {
+						${this.var}.value = ${data}.value;
+					}
+				`);
+                }
+            }
+            if (['button', 'input', 'keygen', 'select', 'textarea'].includes(this.node.name)) {
+                block.chunks.mount.push(b `
+				if (${this.var}.autofocus) ${this.var}.focus();
+			`);
+            }
+        }
+        add_transitions(block) {
+            const { intro, outro } = this.node;
+            if (!intro && !outro)
+                return;
+            if (intro === outro) {
+                // bidirectional transition
+                const name = block.get_unique_name(`${this.var.name}_transition`);
+                const snippet = intro.expression
+                    ? intro.expression.manipulate(block)
+                    : x `{}`;
+                block.add_variable(name);
+                const fn = this.renderer.reference(intro.name);
+                const intro_block = b `
+				@add_render_callback(() => {
+					if (!${name}) ${name} = @create_bidirectional_transition(${this.var}, ${fn}, ${snippet}, true);
+					${name}.run(1);
+				});
+			`;
+                const outro_block = b `
+				if (!${name}) ${name} = @create_bidirectional_transition(${this.var}, ${fn}, ${snippet}, false);
+				${name}.run(0);
+			`;
+                if (intro.is_local) {
+                    block.chunks.intro.push(b `
+					if (#local) {
+						${intro_block}
+					}
+				`);
+                    block.chunks.outro.push(b `
+					if (#local) {
+						${outro_block}
+					}
+				`);
+                }
+                else {
+                    block.chunks.intro.push(intro_block);
+                    block.chunks.outro.push(outro_block);
+                }
+                block.chunks.destroy.push(b `if (detaching && ${name}) ${name}.end();`);
+            }
+            else {
+                const intro_name = intro && block.get_unique_name(`${this.var.name}_intro`);
+                const outro_name = outro && block.get_unique_name(`${this.var.name}_outro`);
+                if (intro) {
+                    block.add_variable(intro_name);
+                    const snippet = intro.expression
+                        ? intro.expression.manipulate(block)
+                        : x `{}`;
+                    const fn = this.renderer.reference(intro.name);
+                    let intro_block;
+                    if (outro) {
+                        intro_block = b `
+						@add_render_callback(() => {
+							if (${outro_name}) ${outro_name}.end(1);
+							${intro_name} = @create_in_transition(${this.var}, ${fn}, ${snippet});
+							${intro_name}.start();
+						});
+					`;
+                        block.chunks.outro.push(b `if (${intro_name}) ${intro_name}.invalidate();`);
+                    }
+                    else {
+                        intro_block = b `
+						if (!${intro_name}) {
+							@add_render_callback(() => {
+								${intro_name} = @create_in_transition(${this.var}, ${fn}, ${snippet});
+								${intro_name}.start();
+							});
+						}
+					`;
+                    }
+                    if (intro.is_local) {
+                        intro_block = b `
+						if (#local) {
+							${intro_block}
+						}
+					`;
+                    }
+                    block.chunks.intro.push(intro_block);
+                }
+                if (outro) {
+                    block.add_variable(outro_name);
+                    const snippet = outro.expression
+                        ? outro.expression.manipulate(block)
+                        : x `{}`;
+                    const fn = this.renderer.reference(outro.name);
+                    if (!intro) {
+                        block.chunks.intro.push(b `
+						if (${outro_name}) ${outro_name}.end(1);
+					`);
+                    }
+                    // TODO hide elements that have outro'd (unless they belong to a still-outroing
+                    // group) prior to their removal from the DOM
+                    let outro_block = b `
+					${outro_name} = @create_out_transition(${this.var}, ${fn}, ${snippet});
+				`;
+                    if (outro.is_local) {
+                        outro_block = b `
+						if (#local) {
+							${outro_block}
+						}
+					`;
+                    }
+                    block.chunks.outro.push(outro_block);
+                    block.chunks.destroy.push(b `if (detaching && ${outro_name}) ${outro_name}.end();`);
+                }
+            }
+            if ((intro && intro.expression && intro.expression.dependencies.size) || (outro && outro.expression && outro.expression.dependencies.size)) {
+                block.maintain_context = true;
+            }
+        }
+        add_animation(block) {
+            if (!this.node.animation)
+                return;
+            const { outro } = this.node;
+            const rect = block.get_unique_name('rect');
+            const stop_animation = block.get_unique_name('stop_animation');
+            block.add_variable(rect);
+            block.add_variable(stop_animation, x `@noop`);
+            block.chunks.measure.push(b `
+			${rect} = ${this.var}.getBoundingClientRect();
+		`);
+            if (block.type === CHILD_DYNAMIC_ELEMENT_BLOCK) {
+                block.chunks.measure.push(b `return ${rect}`);
+                block.chunks.restore_measurements.push(b `${rect} = #measurement;`);
+            }
+            block.chunks.fix.push(b `
+			@fix_position(${this.var});
+			${stop_animation}();
+			${outro && b `@add_transform(${this.var}, ${rect});`}
+		`);
+            let params;
+            if (this.node.animation.expression) {
+                params = this.node.animation.expression.manipulate(block);
+                if (this.node.animation.expression.dynamic_dependencies().length) {
+                    // if `params` is dynamic, calculate params ahead of time in the `.r()` method
+                    const params_var = block.get_unique_name('params');
+                    block.add_variable(params_var);
+                    block.chunks.measure.push(b `${params_var} = ${params};`);
+                    params = params_var;
+                }
+            }
+            else {
+                params = x `{}`;
+            }
+            const name = this.renderer.reference(this.node.animation.name);
+            block.chunks.animate.push(b `
+			${stop_animation}();
+			${stop_animation} = @create_animation(${this.var}, ${rect}, ${name}, ${params});
+		`);
+        }
+        add_classes(block) {
+            const has_spread = this.node.attributes.some(attr => attr.is_spread);
+            this.node.classes.forEach(class_directive => {
+                const { expression, name } = class_directive;
+                let snippet;
+                let dependencies;
+                if (expression) {
+                    snippet = expression.manipulate(block);
+                    dependencies = expression.dependencies;
+                }
+                else {
+                    snippet = name;
+                    dependencies = new Set([name]);
+                }
+                const updater = b `@toggle_class(${this.var}, "${name}", ${snippet});`;
+                block.chunks.hydrate.push(updater);
+                if (has_spread) {
+                    block.chunks.update.push(updater);
+                }
+                else if ((dependencies && dependencies.size > 0) || this.class_dependencies.length) {
+                    const all_dependencies = this.class_dependencies.concat(...dependencies);
+                    const condition = block.renderer.dirty(all_dependencies);
+                    // If all of the dependencies are non-dynamic (don't get updated) then there is no reason
+                    // to add an updater for this.
+                    const any_dynamic_dependencies = all_dependencies.some((dep) => {
+                        const variable = this.renderer.component.var_lookup.get(dep);
+                        return !variable || is_dynamic(variable);
+                    });
+                    if (any_dynamic_dependencies) {
+                        block.chunks.update.push(b `
+						if (${condition}) {
+							${updater}
+						}
+					`);
+                    }
+                }
+            });
+        }
+        add_styles(block) {
+            const has_spread = this.node.attributes.some(attr => attr.is_spread);
+            this.node.styles.forEach((style_directive) => {
+                const { name, expression, should_cache } = style_directive;
+                const snippet = expression.manipulate(block);
+                let cached_snippet;
+                if (should_cache) {
+                    cached_snippet = block.get_unique_name(`style_${name.replace(/-/g, '_')}`);
+                    block.add_variable(cached_snippet, snippet);
+                }
+                const updater = b `@set_style(${this.var}, "${name}", ${should_cache ? cached_snippet : snippet}, false)`;
+                block.chunks.hydrate.push(updater);
+                const dependencies = expression.dynamic_dependencies();
+                if (has_spread) {
+                    block.chunks.update.push(updater);
+                }
+                else if (dependencies.length > 0) {
+                    if (should_cache) {
+                        block.chunks.update.push(b `
+							if (${block.renderer.dirty(dependencies)} && (${cached_snippet} !== (${cached_snippet} = ${snippet}))) {
+								${updater}
+							}
+					`);
+                    }
+                    else {
+                        block.chunks.update.push(b `
+						if (${block.renderer.dirty(dependencies)}) {
+							${updater}
+						}
+					`);
+                    }
+                }
+            });
+        }
+        add_manual_style_scoping(block) {
+            if (this.node.needs_manual_style_scoping) {
+                const updater = b `@toggle_class(${this.var}, "${this.node.component.stylesheet.id}", true);`;
+                block.chunks.hydrate.push(updater);
+                block.chunks.update.push(updater);
+            }
+        }
+    }
+    function to_html(wrappers, block, literal, state, can_use_raw_text) {
+        wrappers.forEach(wrapper => {
+            if (wrapper instanceof TextWrapper) {
+                // Don't add the <pre>/<textare> newline logic here because pre/textarea.innerHTML
+                // would keep the leading newline, too, only someParent.innerHTML = '..<pre/textarea>..' won't
+                if (wrapper.use_space())
+                    state.quasi.value.raw += ' ';
+                const parent = wrapper.node.parent;
+                const raw = parent && (parent.name === 'script' ||
+                    parent.name === 'style' ||
+                    can_use_raw_text);
+                state.quasi.value.raw += (raw ? wrapper.data : escape_html(wrapper.data))
+                    .replace(/\\/g, '\\\\')
+                    .replace(/`/g, '\\`')
+                    .replace(/\$/g, '\\$');
+            }
+            else if (wrapper instanceof MustacheTagWrapper || wrapper instanceof RawMustacheTagWrapper) {
+                literal.quasis.push(state.quasi);
+                literal.expressions.push(wrapper.node.expression.manipulate(block));
+                state.quasi = {
+                    type: 'TemplateElement',
+                    value: { raw: '' }
+                };
+            }
+            else if (wrapper.node.name === 'noscript') ;
+            else {
+                // element
+                state.quasi.value.raw += `<${wrapper.node.name}`;
+                const is_empty_textarea = wrapper.node.name === 'textarea' && wrapper.fragment.nodes.length === 0;
+                wrapper.attributes.forEach((attr) => {
+                    if (is_empty_textarea && attr.node.name === 'value') {
+                        // The value attribute of <textarea> renders as content.
+                        return;
+                    }
+                    state.quasi.value.raw += ` ${fix_attribute_casing(attr.node.name)}="`;
+                    to_html_for_attr_value(attr, block, literal, state);
+                    state.quasi.value.raw += '"';
+                });
+                if (!wrapper.void) {
+                    state.quasi.value.raw += '>';
+                    if (wrapper.node.name === 'pre') {
+                        // Two or more leading newlines are required to restore the leading newline immediately after `<pre>`.
+                        // see https://html.spec.whatwg.org/multipage/grouping-content.html#the-pre-element
+                        const first = wrapper.fragment.nodes[0];
+                        if (first && first.node.type === 'Text' && start_newline.test(first.node.data)) {
+                            state.quasi.value.raw += '\n';
+                        }
+                    }
+                    if (is_empty_textarea) {
+                        // The <textarea> renders the value attribute as content because the content is stored in the value attribute.
+                        const value_attribute = wrapper.attributes.find(attr => attr.node.name === 'value');
+                        if (value_attribute) {
+                            // Two or more leading newlines are required to restore the leading newline immediately after `<textarea>`.
+                            // see https://html.spec.whatwg.org/multipage/syntax.html#element-restrictions
+                            const first = value_attribute.node.chunks[0];
+                            if (first && first.type === 'Text' && start_newline.test(first.data)) {
+                                state.quasi.value.raw += '\n';
+                            }
+                            to_html_for_attr_value(value_attribute, block, literal, state);
+                        }
+                    }
+                    to_html(wrapper.fragment.nodes, block, literal, state);
+                    state.quasi.value.raw += `</${wrapper.node.name}>`;
+                }
+                else {
+                    state.quasi.value.raw += '/>';
+                }
+            }
+        });
+    }
+    function to_html_for_attr_value(attr, block, literal, state) {
+        attr.node.chunks.forEach(chunk => {
+            if (chunk.type === 'Text') {
+                state.quasi.value.raw += escape_html(chunk.data);
+            }
+            else {
+                literal.quasis.push(state.quasi);
+                literal.expressions.push(chunk.manipulate(block));
+                state.quasi = {
+                    type: 'TemplateElement',
+                    value: { raw: '' }
+                };
+            }
+        });
+    }
+
+    class HeadWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.can_use_innerhtml = false;
+            this.fragment = new FragmentWrapper(renderer, block, node.children, this, strip_whitespace, next_sibling);
+        }
+        render(block, _parent_node, _parent_nodes) {
+            let nodes;
+            if (this.renderer.options.hydratable && this.fragment.nodes.length) {
+                nodes = block.get_unique_name('head_nodes');
+                block.chunks.claim.push(b `const ${nodes} = @query_selector_all('[data-svelte="${this.node.id}"]', @_document.head);`);
+            }
+            this.fragment.render(block, x `@_document.head`, nodes);
+            if (nodes && this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `${nodes}.forEach(@detach);`);
+            }
+        }
+    }
+
+    function is_else_if(node) {
+        return (node && node.children.length === 1 && node.children[0].type === 'IfBlock');
+    }
+    class IfBlockBranch extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.var = null;
+            const { expression } = node;
+            const is_else = !expression;
+            if (expression) {
+                this.dependencies = expression.dynamic_dependencies();
+                // TODO is this the right rule? or should any non-reference count?
+                // const should_cache = !is_reference(expression.node, null) && dependencies.length > 0;
+                let should_cache = false;
+                walk(expression.node, {
+                    enter(node) {
+                        if (node.type === 'CallExpression' || node.type === 'NewExpression') {
+                            should_cache = true;
+                        }
+                    }
+                });
+                if (should_cache) {
+                    this.condition = block.get_unique_name('show_if');
+                    this.snippet = expression.manipulate(block);
+                }
+                else {
+                    this.condition = expression.manipulate(block);
+                }
+            }
+            add_const_tags_context(renderer, this.node.const_tags);
+            this.block = block.child({
+                comment: create_debugging_comment(node, parent.renderer.component),
+                name: parent.renderer.component.get_unique_name(is_else ? 'create_else_block' : 'create_if_block'),
+                type: node.expression ? 'if' : 'else'
+            });
+            this.fragment = new FragmentWrapper(renderer, this.block, node.children, parent, strip_whitespace, next_sibling);
+            this.is_dynamic = this.block.dependencies.size > 0;
+            if (node.const_tags.length > 0) {
+                this.get_ctx_name = parent.renderer.component.get_unique_name(is_else ? 'get_else_ctx' : 'get_if_ctx');
+            }
+        }
+    }
+    class IfBlockWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.needs_update = false;
+            this.var = { type: 'Identifier', name: 'if_block' };
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            this.branches = [];
+            const blocks = [];
+            let is_dynamic = false;
+            let has_intros = false;
+            let has_outros = false;
+            const create_branches = (node) => {
+                const branch = new IfBlockBranch(renderer, block, this, node, strip_whitespace, next_sibling);
+                this.branches.push(branch);
+                blocks.push(branch.block);
+                block.add_dependencies(node.expression.dependencies);
+                if (branch.block.dependencies.size > 0) {
+                    // the condition, or its contents, is dynamic
+                    is_dynamic = true;
+                    block.add_dependencies(branch.block.dependencies);
+                }
+                if (branch.dependencies && branch.dependencies.length > 0) {
+                    // the condition itself is dynamic
+                    this.needs_update = true;
+                }
+                if (branch.block.has_intros)
+                    has_intros = true;
+                if (branch.block.has_outros)
+                    has_outros = true;
+                if (is_else_if(node.else)) {
+                    create_branches(node.else.children[0]);
+                }
+                else if (node.else) {
+                    const branch = new IfBlockBranch(renderer, block, this, node.else, strip_whitespace, next_sibling);
+                    this.branches.push(branch);
+                    blocks.push(branch.block);
+                    if (branch.block.dependencies.size > 0) {
+                        is_dynamic = true;
+                        block.add_dependencies(branch.block.dependencies);
+                    }
+                    if (branch.block.has_intros)
+                        has_intros = true;
+                    if (branch.block.has_outros)
+                        has_outros = true;
+                }
+            };
+            create_branches(this.node);
+            blocks.forEach(block => {
+                block.has_update_method = is_dynamic;
+                block.has_intro_method = has_intros;
+                block.has_outro_method = has_outros;
+            });
+            push_array$1(renderer.blocks, blocks);
+        }
+        render(block, parent_node, parent_nodes) {
+            const name = this.var;
+            const needs_anchor = this.next ? !this.next.is_dom_node() : !parent_node || !this.parent.is_dom_node();
+            const anchor = needs_anchor
+                ? block.get_unique_name(`${this.var.name}_anchor`)
+                : (this.next && this.next.var) || 'null';
+            const has_else = !(this.branches[this.branches.length - 1].condition);
+            const if_exists_condition = has_else ? null : name;
+            const dynamic = this.branches[0].block.has_update_method; // can use [0] as proxy for all, since they necessarily have the same value
+            const has_intros = this.branches[0].block.has_intro_method;
+            const has_outros = this.branches[0].block.has_outro_method;
+            const has_transitions = has_intros || has_outros;
+            this.branches.forEach(branch => {
+                if (branch.get_ctx_name) {
+                    this.renderer.blocks.push(b `
+				function ${branch.get_ctx_name}(#ctx) {
+					const child_ctx = #ctx.slice();
+					${add_const_tags(block, branch.node.const_tags, 'child_ctx')}
+					return child_ctx;
+				}
+				`);
+                }
+            });
+            const vars = { name, anchor, if_exists_condition, has_else, has_transitions };
+            const detaching = parent_node && !is_head(parent_node) ? null : 'detaching';
+            if (this.node.else) {
+                this.branches.forEach(branch => {
+                    if (branch.snippet)
+                        block.add_variable(branch.condition);
+                });
+                if (has_outros) {
+                    this.render_compound_with_outros(block, parent_node, parent_nodes, dynamic, vars, detaching);
+                    block.chunks.outro.push(b `@transition_out(${name});`);
+                }
+                else {
+                    this.render_compound(block, parent_node, parent_nodes, dynamic, vars, detaching);
+                }
+            }
+            else {
+                this.render_simple(block, parent_node, parent_nodes, dynamic, vars, detaching);
+                if (has_outros) {
+                    block.chunks.outro.push(b `@transition_out(${name});`);
+                }
+            }
+            if (if_exists_condition) {
+                block.chunks.create.push(b `if (${if_exists_condition}) ${name}.c();`);
+            }
+            else {
+                block.chunks.create.push(b `${name}.c();`);
+            }
+            if (parent_nodes && this.renderer.options.hydratable) {
+                if (if_exists_condition) {
+                    block.chunks.claim.push(b `if (${if_exists_condition}) ${name}.l(${parent_nodes});`);
+                }
+                else {
+                    block.chunks.claim.push(b `${name}.l(${parent_nodes});`);
+                }
+            }
+            if (has_intros || has_outros) {
+                block.chunks.intro.push(b `@transition_in(${name});`);
+            }
+            if (needs_anchor) {
+                block.add_element(anchor, x `@empty()`, parent_nodes && x `@empty()`, parent_node);
+            }
+            this.branches.forEach(branch => {
+                branch.fragment.render(branch.block, null, x `#nodes`);
+            });
+        }
+        render_compound(block, parent_node, _parent_nodes, dynamic, { name, anchor, has_else, if_exists_condition, has_transitions }, detaching) {
+            const select_block_type = this.renderer.component.get_unique_name('select_block_type');
+            const current_block_type = block.get_unique_name('current_block_type');
+            const need_select_block_ctx = this.branches.some(branch => branch.get_ctx_name);
+            const select_block_ctx = need_select_block_ctx ? block.get_unique_name('select_block_ctx') : null;
+            const if_ctx = select_block_ctx ? x `${select_block_ctx}(#ctx, ${current_block_type})` : x `#ctx`;
+            const get_block = has_else
+                ? x `${current_block_type}(${if_ctx})`
+                : x `${current_block_type} && ${current_block_type}(${if_ctx})`;
+            if (this.needs_update) {
+                block.chunks.init.push(b `
+				function ${select_block_type}(#ctx, #dirty) {
+					${this.branches.map(({ dependencies, condition, snippet }) => {
+                return b `${snippet && dependencies.length > 0 ? b `if (${block.renderer.dirty(dependencies)}) ${condition} = null;` : null}`;
+            })}
+					${this.branches.map(({ condition, snippet, block }) => condition
+                ? b `
+								${snippet && b `if (${condition} == null) ${condition} = !!${snippet}`}
+								if (${condition}) return ${block.name};`
+                : b `return ${block.name};`)}
+				}
+			`);
+            }
+            else {
+                block.chunks.init.push(b `
+				function ${select_block_type}(#ctx, #dirty) {
+					${this.branches.map(({ condition, snippet, block }) => condition
+                ? b `if (${snippet || condition}) return ${block.name};`
+                : b `return ${block.name};`)}
+				}
+			`);
+            }
+            if (need_select_block_ctx) {
+                // if all branches needs create a context
+                if (this.branches.every(branch => branch.get_ctx_name)) {
+                    block.chunks.init.push(b `
+					function ${select_block_ctx}(#ctx, #type) {
+						${this.branches.map(({ condition, get_ctx_name, block }) => {
+                    return condition
+                        ? b `if (#type === ${block.name}) return ${get_ctx_name}(#ctx);`
+                        : b `return ${get_ctx_name}(#ctx);`;
+                }).filter(Boolean)}
+					}
+				`);
+                }
+                else {
+                    // when not all branches need to create a new context,
+                    // this code is simpler
+                    block.chunks.init.push(b `
+					function ${select_block_ctx}(#ctx, #type) {
+						${this.branches.map(({ get_ctx_name, block }) => {
+                    return get_ctx_name
+                        ? b `if (#type === ${block.name}) return ${get_ctx_name}(#ctx);`
+                        : null;
+                }).filter(Boolean)}
+						return #ctx;
+					}
+				`);
+                }
+            }
+            block.chunks.init.push(b `
+			let ${current_block_type} = ${select_block_type}(#ctx, ${this.renderer.get_initial_dirty()});
+			let ${name} = ${get_block};
+		`);
+            const initial_mount_node = parent_node || '#target';
+            const anchor_node = parent_node ? 'null' : '#anchor';
+            if (if_exists_condition) {
+                block.chunks.mount.push(b `if (${if_exists_condition}) ${name}.m(${initial_mount_node}, ${anchor_node});`);
+            }
+            else {
+                block.chunks.mount.push(b `${name}.m(${initial_mount_node}, ${anchor_node});`);
+            }
+            if (this.needs_update) {
+                const update_mount_node = this.get_update_mount_node(anchor);
+                const change_block = b `
+				${if_exists_condition ? b `if (${if_exists_condition}) ${name}.d(1)` : b `${name}.d(1)`};
+				${name} = ${get_block};
+				if (${name}) {
+					${name}.c();
+					${has_transitions && b `@transition_in(${name}, 1);`}
+					${name}.m(${update_mount_node}, ${anchor});
+				}
+			`;
+                if (dynamic) {
+                    block.chunks.update.push(b `
+					if (${current_block_type} === (${current_block_type} = ${select_block_type}(#ctx, #dirty)) && ${name}) {
+						${name}.p(${if_ctx}, #dirty);
+					} else {
+						${change_block}
+					}
+				`);
+                }
+                else {
+                    block.chunks.update.push(b `
+					if (${current_block_type} !== (${current_block_type} = ${select_block_type}(#ctx, #dirty))) {
+						${change_block}
+					}
+				`);
+                }
+            }
+            else if (dynamic) {
+                if (if_exists_condition) {
+                    block.chunks.update.push(b `if (${if_exists_condition}) ${name}.p(${if_ctx}, #dirty);`);
+                }
+                else {
+                    block.chunks.update.push(b `${name}.p(${if_ctx}, #dirty);`);
+                }
+            }
+            if (if_exists_condition) {
+                block.chunks.destroy.push(b `
+				if (${if_exists_condition}) {
+					${name}.d(${detaching});
+				}
+			`);
+            }
+            else {
+                block.chunks.destroy.push(b `
+				${name}.d(${detaching});
+			`);
+            }
+        }
+        // if any of the siblings have outros, we need to keep references to the blocks
+        // (TODO does this only apply to bidi transitions?)
+        render_compound_with_outros(block, parent_node, _parent_nodes, dynamic, { name, anchor, has_else, has_transitions, if_exists_condition }, detaching) {
+            const select_block_type = this.renderer.component.get_unique_name('select_block_type');
+            const current_block_type_index = block.get_unique_name('current_block_type_index');
+            const previous_block_index = block.get_unique_name('previous_block_index');
+            const if_block_creators = block.get_unique_name('if_block_creators');
+            const if_blocks = block.get_unique_name('if_blocks');
+            const need_select_block_ctx = this.branches.some(branch => branch.get_ctx_name);
+            const select_block_ctx = need_select_block_ctx ? block.get_unique_name('select_block_ctx') : null;
+            const if_ctx = select_block_ctx ? x `${select_block_ctx}(#ctx, ${current_block_type_index})` : x `#ctx`;
+            const if_current_block_type_index = has_else
+                ? nodes => nodes
+                : nodes => b `if (~${current_block_type_index}) { ${nodes} }`;
+            block.add_variable(current_block_type_index);
+            block.add_variable(name);
+            block.chunks.init.push(b `
+			const ${if_block_creators} = [
+				${this.branches.map(branch => branch.block.name)}
+			];
+
+			const ${if_blocks} = [];
+
+			${this.needs_update
+            ? b `
+					function ${select_block_type}(#ctx, #dirty) {
+						${this.branches.map(({ dependencies, condition, snippet }) => {
+                return b `${snippet && dependencies.length > 0 ? b `if (${block.renderer.dirty(dependencies)}) ${condition} = null;` : null}`;
+            })}
+						${this.branches.map(({ condition, snippet }, i) => condition
+                ? b `
+								${snippet && b `if (${condition} == null) ${condition} = !!${snippet}`}
+								if (${condition}) return ${i};`
+                : b `return ${i};`)}
+								${!has_else && b `return -1;`}
+							}
+						`
+            : b `
+					function ${select_block_type}(#ctx, #dirty) {
+						${this.branches.map(({ condition, snippet }, i) => condition
+                ? b `if (${snippet || condition}) return ${i};`
+                : b `return ${i};`)}
+						${!has_else && b `return -1;`}
+					}
+				`}
+		`);
+            if (need_select_block_ctx) {
+                // if all branches needs create a context
+                if (this.branches.every(branch => branch.get_ctx_name)) {
+                    block.chunks.init.push(b `
+					function ${select_block_ctx}(#ctx, #index) {
+						${this.branches.map(({ condition, get_ctx_name }, i) => {
+                    return condition
+                        ? b `if (#index === ${i}) return ${get_ctx_name}(#ctx);`
+                        : b `return ${get_ctx_name}(#ctx);`;
+                }).filter(Boolean)}
+					}
+				`);
+                }
+                else {
+                    // when not all branches need to create a new context,
+                    // this code is simpler
+                    block.chunks.init.push(b `
+					function ${select_block_ctx}(#ctx, #index) {
+						${this.branches.map(({ get_ctx_name }, i) => {
+                    return get_ctx_name
+                        ? b `if (#index === ${i}) return ${get_ctx_name}(#ctx);`
+                        : null;
+                }).filter(Boolean)}
+						return #ctx;
+					}
+				`);
+                }
+            }
+            if (has_else) {
+                block.chunks.init.push(b `
+				${current_block_type_index} = ${select_block_type}(#ctx, ${this.renderer.get_initial_dirty()});
+				${name} = ${if_blocks}[${current_block_type_index}] = ${if_block_creators}[${current_block_type_index}](${if_ctx});
+			`);
+            }
+            else {
+                block.chunks.init.push(b `
+				if (~(${current_block_type_index} = ${select_block_type}(#ctx, ${this.renderer.get_initial_dirty()}))) {
+					${name} = ${if_blocks}[${current_block_type_index}] = ${if_block_creators}[${current_block_type_index}](${if_ctx});
+				}
+			`);
+            }
+            const initial_mount_node = parent_node || '#target';
+            const anchor_node = parent_node ? 'null' : '#anchor';
+            block.chunks.mount.push(if_current_block_type_index(b `${if_blocks}[${current_block_type_index}].m(${initial_mount_node}, ${anchor_node});`));
+            if (this.needs_update) {
+                const update_mount_node = this.get_update_mount_node(anchor);
+                const destroy_old_block = b `
+				@group_outros();
+				@transition_out(${if_blocks}[${previous_block_index}], 1, 1, () => {
+					${if_blocks}[${previous_block_index}] = null;
+				});
+				@check_outros();
+			`;
+                const create_new_block = b `
+				${name} = ${if_blocks}[${current_block_type_index}];
+				if (!${name}) {
+					${name} = ${if_blocks}[${current_block_type_index}] = ${if_block_creators}[${current_block_type_index}](${if_ctx});
+					${name}.c();
+				} else {
+					${dynamic && b `${name}.p(${if_ctx}, #dirty);`}
+				}
+				${has_transitions && b `@transition_in(${name}, 1);`}
+				${name}.m(${update_mount_node}, ${anchor});
+			`;
+                const change_block = has_else
+                    ? b `
+					${destroy_old_block}
+
+					${create_new_block}
+				`
+                    : b `
+					if (${name}) {
+						${destroy_old_block}
+					}
+
+					if (~${current_block_type_index}) {
+						${create_new_block}
+					} else {
+						${name} = null;
+					}
+				`;
+                block.chunks.update.push(b `
+				let ${previous_block_index} = ${current_block_type_index};
+				${current_block_type_index} = ${select_block_type}(#ctx, #dirty);
+			`);
+                if (dynamic) {
+                    block.chunks.update.push(b `
+					if (${current_block_type_index} === ${previous_block_index}) {
+						${if_current_block_type_index(b `${if_blocks}[${current_block_type_index}].p(${if_ctx}, #dirty);`)}
+					} else {
+						${change_block}
+					}
+				`);
+                }
+                else {
+                    block.chunks.update.push(b `
+					if (${current_block_type_index} !== ${previous_block_index}) {
+						${change_block}
+					}
+				`);
+                }
+            }
+            else if (dynamic) {
+                if (if_exists_condition) {
+                    block.chunks.update.push(b `if (${if_exists_condition}) ${name}.p(${if_ctx}, #dirty);`);
+                }
+                else {
+                    block.chunks.update.push(b `${name}.p(${if_ctx}, #dirty);`);
+                }
+            }
+            block.chunks.destroy.push(if_current_block_type_index(b `${if_blocks}[${current_block_type_index}].d(${detaching});`));
+        }
+        render_simple(block, parent_node, _parent_nodes, dynamic, { name, anchor, if_exists_condition, has_transitions }, detaching) {
+            const branch = this.branches[0];
+            const if_ctx = branch.get_ctx_name ? x `${branch.get_ctx_name}(#ctx)` : x `#ctx`;
+            if (branch.snippet)
+                block.add_variable(branch.condition, branch.snippet);
+            block.chunks.init.push(b `
+			let ${name} = ${branch.condition} && ${branch.block.name}(${if_ctx});
+		`);
+            const initial_mount_node = parent_node || '#target';
+            const anchor_node = parent_node ? 'null' : '#anchor';
+            block.chunks.mount.push(b `if (${name}) ${name}.m(${initial_mount_node}, ${anchor_node});`);
+            if (branch.dependencies.length > 0) {
+                const update_mount_node = this.get_update_mount_node(anchor);
+                const enter = b `
+				if (${name}) {
+					${dynamic && b `${name}.p(${if_ctx}, #dirty);`}
+					${has_transitions &&
+                b `if (${block.renderer.dirty(branch.dependencies)}) {
+									@transition_in(${name}, 1);
+								}`}
+				} else {
+					${name} = ${branch.block.name}(${if_ctx});
+					${name}.c();
+					${has_transitions && b `@transition_in(${name}, 1);`}
+					${name}.m(${update_mount_node}, ${anchor});
+				}
+			`;
+                if (branch.snippet) {
+                    block.chunks.update.push(b `if (${block.renderer.dirty(branch.dependencies)}) ${branch.condition} = ${branch.snippet}`);
+                }
+                // no `p()` here — we don't want to update outroing nodes,
+                // as that will typically result in glitching
+                if (branch.block.has_outro_method) {
+                    block.chunks.update.push(b `
+					if (${branch.condition}) {
+						${enter}
+					} else if (${name}) {
+						@group_outros();
+						@transition_out(${name}, 1, 1, () => {
+							${name} = null;
+						});
+						@check_outros();
+					}
+				`);
+                }
+                else {
+                    block.chunks.update.push(b `
+					if (${branch.condition}) {
+						${enter}
+					} else if (${name}) {
+						${name}.d(1);
+						${name} = null;
+					}
+				`);
+                }
+            }
+            else if (dynamic) {
+                block.chunks.update.push(b `
+				if (${branch.condition}) ${name}.p(${if_ctx}, #dirty);
+			`);
+            }
+            if (if_exists_condition) {
+                block.chunks.destroy.push(b `
+				if (${if_exists_condition}) ${name}.d(${detaching});
+			`);
+            }
+            else {
+                block.chunks.destroy.push(b `
+				${name}.d(${detaching});
+			`);
+            }
+        }
+    }
+
+    class KeyBlockWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.var = { type: 'Identifier', name: 'key_block' };
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            this.dependencies = node.expression.dynamic_dependencies();
+            if (this.dependencies.length) {
+                block = block.child({
+                    comment: create_debugging_comment(node, renderer.component),
+                    name: renderer.component.get_unique_name('create_key_block'),
+                    type: 'key'
+                });
+                block.add_dependencies(node.expression.dependencies);
+                renderer.blocks.push(block);
+            }
+            this.block = block;
+            this.fragment = new FragmentWrapper(renderer, this.block, node.children, this, strip_whitespace, next_sibling);
+        }
+        render(block, parent_node, parent_nodes) {
+            if (this.dependencies.length === 0) {
+                this.render_static_key(block, parent_node, parent_nodes);
+            }
+            else {
+                this.render_dynamic_key(block, parent_node, parent_nodes);
+            }
+        }
+        render_static_key(_block, parent_node, parent_nodes) {
+            this.fragment.render(this.block, parent_node, parent_nodes);
+        }
+        render_dynamic_key(block, parent_node, parent_nodes) {
+            this.fragment.render(this.block, null, x `#nodes`);
+            const has_transitions = !!(this.block.has_intro_method || this.block.has_outro_method);
+            const dynamic = this.block.has_update_method;
+            const previous_key = block.get_unique_name('previous_key');
+            const snippet = this.node.expression.manipulate(block);
+            block.add_variable(previous_key, snippet);
+            const not_equal = this.renderer.component.component_options.immutable ? x `@not_equal` : x `@safe_not_equal`;
+            const condition = x `${this.renderer.dirty(this.dependencies)} && ${not_equal}(${previous_key}, ${previous_key} = ${snippet})`;
+            block.chunks.init.push(b `
+			let ${this.var} = ${this.block.name}(#ctx);
+		`);
+            block.chunks.create.push(b `${this.var}.c();`);
+            if (this.renderer.options.hydratable) {
+                block.chunks.claim.push(b `${this.var}.l(${parent_nodes});`);
+            }
+            block.chunks.mount.push(b `${this.var}.m(${parent_node || '#target'}, ${parent_node ? 'null' : '#anchor'});`);
+            const anchor = this.get_or_create_anchor(block, parent_node, parent_nodes);
+            const body = b `
+			${has_transitions
+            ? b `
+						@group_outros();
+						@transition_out(${this.var}, 1, 1, @noop);
+						@check_outros();
+					`
+            : b `${this.var}.d(1);`}
+			${this.var} = ${this.block.name}(#ctx);
+			${this.var}.c();
+			${has_transitions && b `@transition_in(${this.var}, 1)`}
+			${this.var}.m(${this.get_update_mount_node(anchor)}, ${anchor});
+		`;
+            if (dynamic) {
+                block.chunks.update.push(b `
+				if (${condition}) {
+					${body}
+				} else {
+					${this.var}.p(#ctx, #dirty);
+				}
+			`);
+            }
+            else {
+                block.chunks.update.push(b `
+				if (${condition}) {
+					${body}
+				}
+			`);
+            }
+            if (has_transitions) {
+                block.chunks.intro.push(b `@transition_in(${this.var})`);
+                block.chunks.outro.push(b `@transition_out(${this.var})`);
+            }
+            block.chunks.destroy.push(b `${this.var}.d(detaching)`);
+        }
+    }
+
+    function get_slot_definition(block, scope, lets) {
+        if (lets.length === 0)
+            return { block, scope };
+        const context_input = {
+            type: 'ObjectPattern',
+            properties: lets.map(l => ({
+                type: 'Property',
+                kind: 'init',
+                key: l.name,
+                value: l.value || l.name
+            }))
+        };
+        const properties = [];
+        const value_map = new Map();
+        lets.forEach(l => {
+            let value;
+            if (l.names.length > 1) {
+                // more than one, probably destructuring
+                const unique_name = block.get_unique_name(l.names.join('_')).name;
+                value_map.set(l.value, unique_name);
+                value = { type: 'Identifier', name: unique_name };
+            }
+            else {
+                value = l.value || l.name;
+            }
+            properties.push({
+                type: 'Property',
+                kind: 'init',
+                key: l.name,
+                value
+            });
+        });
+        const changes_input = {
+            type: 'ObjectPattern',
+            properties
+        };
+        const names = new Set();
+        const names_lookup = new Map();
+        lets.forEach(l => {
+            l.names.forEach(name => {
+                names.add(name);
+                if (value_map.has(l.value)) {
+                    names_lookup.set(name, value_map.get(l.value));
+                }
+            });
+        });
+        const context = {
+            type: 'ObjectExpression',
+            properties: Array.from(names).map(name => p `${block.renderer.context_lookup.get(name).index}: ${name}`)
+        };
+        const { context_lookup } = block.renderer;
+        // i am well aware that this code is gross
+        // TODO: context-overflow make it less gross
+        const changes = {
+            type: 'ParenthesizedExpression',
+            get expression() {
+                if (block.renderer.context_overflow) {
+                    const grouped = [];
+                    Array.from(names).forEach(name => {
+                        const i = context_lookup.get(name).index.value;
+                        const g = Math.floor(i / 31);
+                        const lookup_name = names_lookup.has(name) ? names_lookup.get(name) : name;
+                        if (!grouped[g])
+                            grouped[g] = [];
+                        grouped[g].push({ name: lookup_name, n: i % 31 });
+                    });
+                    const elements = [];
+                    for (let g = 0; g < grouped.length; g += 1) {
+                        elements[g] = grouped[g]
+                            ? grouped[g]
+                                .map(({ name, n }) => x `${name} ? ${1 << n} : 0`)
+                                .reduce((lhs, rhs) => x `${lhs} | ${rhs}`)
+                            : x `0`;
+                    }
+                    return {
+                        type: 'ArrayExpression',
+                        elements
+                    };
+                }
+                return Array.from(names)
+                    .map(name => {
+                    const lookup_name = names_lookup.has(name) ? names_lookup.get(name) : name;
+                    const i = context_lookup.get(name).index.value;
+                    return x `${lookup_name} ? ${1 << i} : 0`;
+                })
+                    .reduce((lhs, rhs) => x `${lhs} | ${rhs}`);
+            }
+        };
+        return {
+            block,
+            scope,
+            get_context: x `${context_input} => ${context}`,
+            get_changes: x `${changes_input} => ${changes}`
+        };
+    }
+
+    class SlotTemplateWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            const { scope, lets, const_tags, slot_template_name } = this.node;
+            lets.forEach(l => {
+                extract_names(l.value || l.name).forEach(name => {
+                    renderer.add_to_context(name, true);
+                });
+            });
+            add_const_tags_context(renderer, const_tags);
+            this.block = block.child({
+                comment: create_debugging_comment(this.node, this.renderer.component),
+                name: this.renderer.component.get_unique_name(`create_${sanitize(slot_template_name)}_slot`),
+                type: 'slot'
+            });
+            this.renderer.blocks.push(this.block);
+            const seen = new Set(lets.map(l => l.name.name));
+            this.parent.node.lets.forEach(l => {
+                if (!seen.has(l.name.name))
+                    lets.push(l);
+            });
+            this.parent.set_slot(slot_template_name, get_slot_definition(this.block, scope, lets));
+            this.fragment = new FragmentWrapper(renderer, this.block, node.type === 'SlotTemplate' ? node.children : [node], this, strip_whitespace, next_sibling);
+            this.block.parent.add_dependencies(this.block.dependencies);
+        }
+        render() {
+            this.fragment.render(this.block, null, x `#nodes`);
+            if (this.node.const_tags.length > 0) {
+                this.render_get_context();
+            }
+        }
+        render_get_context() {
+            const get_context = this.block.renderer.component.get_unique_name('get_context');
+            this.block.renderer.blocks.push(b `
+			function ${get_context}(#ctx) {
+				${add_const_tags(this.block, this.node.const_tags, '#ctx')}
+			}
+		`);
+            this.block.chunks.declarations.push(b `${get_context}(#ctx)`);
+            if (this.block.has_update_method) {
+                this.block.chunks.update.unshift(b `${get_context}(#ctx)`);
+            }
+        }
+    }
+
+    function string_to_member_expression(name) {
+        const parts = name.split('.');
+        let node = {
+            type: 'Identifier',
+            name: parts[0]
+        };
+        for (let i = 1; i < parts.length; i++) {
+            node = {
+                type: 'MemberExpression',
+                object: node,
+                property: { type: 'Identifier', name: parts[i] }
+            };
+        }
+        return node;
+    }
+
+    class InlineComponentWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.slots = new Map();
+            this.children = [];
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            if (this.node.expression) {
+                block.add_dependencies(this.node.expression.dependencies);
+            }
+            this.node.attributes.forEach(attr => {
+                block.add_dependencies(attr.dependencies);
+            });
+            this.node.bindings.forEach(binding => {
+                if (binding.is_contextual) {
+                    mark_each_block_bindings(this, binding);
+                }
+                block.add_dependencies(binding.expression.dependencies);
+            });
+            this.node.handlers.forEach(handler => {
+                if (handler.expression) {
+                    block.add_dependencies(handler.expression.dependencies);
+                }
+            });
+            this.node.css_custom_properties.forEach(attr => {
+                block.add_dependencies(attr.dependencies);
+            });
+            this.var = {
+                type: 'Identifier',
+                name: (this.node.name === 'svelte:self' ? renderer.component.name.name :
+                    this.node.name === 'svelte:component' ? 'switch_instance' :
+                        sanitize(this.node.name)).toLowerCase()
+            };
+            if (this.node.children.length) {
+                this.node.lets.forEach(l => {
+                    extract_names(l.value || l.name).forEach(name => {
+                        renderer.add_to_context(name, true);
+                    });
+                });
+                this.children = this.node.children.map(child => new SlotTemplateWrapper(renderer, block, this, child, strip_whitespace, next_sibling));
+            }
+            block.add_outro();
+        }
+        set_slot(name, slot_definition) {
+            if (this.slots.has(name)) {
+                if (name === 'default') {
+                    throw new Error('Found elements without slot attribute when using slot="default"');
+                }
+                throw new Error(`Duplicate slot name "${name}" in <${this.node.name}>`);
+            }
+            this.slots.set(name, slot_definition);
+        }
+        warn_if_reactive() {
+            const { name } = this.node;
+            const variable = this.renderer.component.var_lookup.get(name);
+            if (!variable) {
+                return;
+            }
+            if (variable.reassigned || variable.export_name || variable.is_reactive_dependency) {
+                this.renderer.component.warn(this.node, compiler_warnings.reactive_component(name));
+            }
+        }
+        render(block, parent_node, parent_nodes) {
+            this.warn_if_reactive();
+            const { renderer } = this;
+            const { component } = renderer;
+            const name = this.var;
+            block.add_variable(name);
+            const component_opts = x `{}`;
+            const statements = [];
+            const updates = [];
+            this.children.forEach((child) => {
+                this.renderer.add_to_context('$$scope', true);
+                child.render(block, null, x `#nodes`);
+            });
+            let props;
+            const name_changes = block.get_unique_name(`${name.name}_changes`);
+            const uses_spread = !!this.node.attributes.find(a => a.is_spread);
+            // removing empty slot
+            for (const slot of this.slots.keys()) {
+                if (!this.slots.get(slot).block.has_content()) {
+                    this.renderer.remove_block(this.slots.get(slot).block);
+                    this.slots.delete(slot);
+                }
+            }
+            const has_css_custom_properties = this.node.css_custom_properties.length > 0;
+            const css_custom_properties_wrapper = has_css_custom_properties ? block.get_unique_name('div') : null;
+            if (has_css_custom_properties) {
+                block.add_variable(css_custom_properties_wrapper);
+            }
+            const initial_props = this.slots.size > 0
+                ? [
+                    p `$$slots: {
+					${Array.from(this.slots).map(([name, slot]) => {
+                    return p `${name}: [${slot.block.name}, ${slot.get_context || null}, ${slot.get_changes || null}]`;
+                })}
+				}`,
+                    p `$$scope: {
+					ctx: #ctx
+				}`
+                ]
+                : [];
+            const attribute_object = uses_spread
+                ? x `{ ${initial_props} }`
+                : x `{
+				${this.node.attributes.map(attr => p `${attr.name}: ${attr.get_value(block)}`)},
+				${initial_props}
+			}`;
+            if (this.node.attributes.length || this.node.bindings.length || initial_props.length) {
+                if (!uses_spread && this.node.bindings.length === 0) {
+                    component_opts.properties.push(p `props: ${attribute_object}`);
+                }
+                else {
+                    props = block.get_unique_name(`${name.name}_props`);
+                    component_opts.properties.push(p `props: ${props}`);
+                }
+            }
+            if (component.compile_options.dev) {
+                // TODO this is a terrible hack, but without it the component
+                // will complain that options.target is missing. This would
+                // work better if components had separate public and private
+                // APIs
+                component_opts.properties.push(p `$$inline: true`);
+            }
+            const fragment_dependencies = new Set(this.slots.size ? ['$$scope'] : []);
+            this.slots.forEach(slot => {
+                slot.block.dependencies.forEach(name => {
+                    const is_let = slot.scope.is_let(name);
+                    const variable = renderer.component.var_lookup.get(name);
+                    if (is_let || is_dynamic(variable))
+                        fragment_dependencies.add(name);
+                });
+            });
+            const dynamic_attributes = this.node.attributes.filter(a => a.get_dependencies().length > 0);
+            if (!uses_spread && (dynamic_attributes.length > 0 || this.node.bindings.length > 0 || fragment_dependencies.size > 0)) {
+                updates.push(b `const ${name_changes} = {};`);
+            }
+            if (this.node.attributes.length) {
+                if (uses_spread) {
+                    const levels = block.get_unique_name(`${this.var.name}_spread_levels`);
+                    const initial_props = [];
+                    const changes = [];
+                    const all_dependencies = new Set();
+                    this.node.attributes.forEach(attr => {
+                        add_to_set(all_dependencies, attr.dependencies);
+                    });
+                    this.node.attributes.forEach((attr, i) => {
+                        const { name, dependencies } = attr;
+                        const condition = dependencies.size > 0 && (dependencies.size !== all_dependencies.size)
+                            ? renderer.dirty(Array.from(dependencies))
+                            : null;
+                        const unchanged = dependencies.size === 0;
+                        let change_object;
+                        if (attr.is_spread) {
+                            const value = attr.expression.manipulate(block);
+                            initial_props.push(value);
+                            let value_object = value;
+                            if (attr.expression.node.type !== 'ObjectExpression') {
+                                value_object = x `@get_spread_object(${value})`;
+                            }
+                            change_object = value_object;
+                        }
+                        else {
+                            const obj = x `{ ${name}: ${attr.get_value(block)} }`;
+                            initial_props.push(obj);
+                            change_object = obj;
+                        }
+                        changes.push(unchanged
+                            ? x `${levels}[${i}]`
+                            : condition
+                                ? x `${condition} && ${change_object}`
+                                : change_object);
+                    });
+                    block.chunks.init.push(b `
+					const ${levels} = [
+						${initial_props}
+					];
+				`);
+                    statements.push(b `
+					for (let #i = 0; #i < ${levels}.length; #i += 1) {
+						${props} = @assign(${props}, ${levels}[#i]);
+					}
+				`);
+                    if (all_dependencies.size) {
+                        const condition = renderer.dirty(Array.from(all_dependencies));
+                        updates.push(b `
+						const ${name_changes} = ${condition} ? @get_spread_update(${levels}, [
+							${changes}
+						]) : {}
+					`);
+                    }
+                    else {
+                        updates.push(b `
+						const ${name_changes} = {};
+					`);
+                    }
+                }
+                else {
+                    dynamic_attributes.forEach((attribute) => {
+                        const dependencies = attribute.get_dependencies();
+                        if (dependencies.length > 0) {
+                            const condition = renderer.dirty(dependencies);
+                            updates.push(b `
+							if (${condition}) ${name_changes}.${attribute.name} = ${attribute.get_value(block)};
+						`);
+                        }
+                    });
+                }
+            }
+            if (fragment_dependencies.size > 0) {
+                updates.push(b `
+				if (${renderer.dirty(Array.from(fragment_dependencies))}) {
+					${name_changes}.$$scope = { dirty: #dirty, ctx: #ctx };
+				}`);
+            }
+            const munged_bindings = this.node.bindings.map(binding => {
+                component.has_reactive_assignments = true;
+                if (binding.name === 'this') {
+                    return bind_this(component, block, new BindingWrapper(block, binding, this), this.var);
+                }
+                const id = component.get_unique_name(`${this.var.name}_${binding.name}_binding`);
+                renderer.add_to_context(id.name);
+                const callee = renderer.reference(id);
+                const updating = block.get_unique_name(`updating_${binding.name}`);
+                block.add_variable(updating);
+                const snippet = binding.expression.manipulate(block);
+                statements.push(b `
+				if (${snippet} !== void 0) {
+					${props}.${binding.name} = ${snippet};
+				}`);
+                updates.push(b `
+				if (!${updating} && ${renderer.dirty(Array.from(binding.expression.dependencies))}) {
+					${updating} = true;
+					${name_changes}.${binding.name} = ${snippet};
+					@add_flush_callback(() => ${updating} = false);
+				}
+			`);
+                const contextual_dependencies = Array.from(binding.expression.contextual_dependencies);
+                const dependencies = Array.from(binding.expression.dependencies);
+                let lhs = binding.raw_expression;
+                if (binding.is_contextual && binding.expression.node.type === 'Identifier') {
+                    // bind:x={y} — we can't just do `y = x`, we need to
+                    // to `array[index] = x;
+                    const { name } = binding.expression.node;
+                    const { object, property, snippet } = block.bindings.get(name);
+                    lhs = snippet;
+                    contextual_dependencies.push(object.name, property.name);
+                }
+                const params = [x `#value`];
+                const args = [x `#value`];
+                if (contextual_dependencies.length > 0) {
+                    contextual_dependencies.forEach(name => {
+                        params.push({
+                            type: 'Identifier',
+                            name
+                        });
+                        renderer.add_to_context(name, true);
+                        args.push(renderer.reference(name));
+                    });
+                    block.maintain_context = true; // TODO put this somewhere more logical
+                }
+                block.chunks.init.push(b `
+				function ${id}(#value) {
+					${callee}(${args});
+				}
+			`);
+                let invalidate_binding = b `
+				${lhs} = #value;
+				${renderer.invalidate(dependencies[0])};
+			`;
+                if (binding.expression.node.type === 'MemberExpression') {
+                    invalidate_binding = b `
+					if ($$self.$$.not_equal(${lhs}, #value)) {
+						${invalidate_binding}
+					}
+				`;
+                }
+                const body = b `
+				function ${id}(${params}) {
+					${invalidate_binding}
+				}
+			`;
+                component.partly_hoisted.push(body);
+                return b `@binding_callbacks.push(() => @bind(${this.var}, '${binding.name}', ${id}));`;
+            });
+            const munged_handlers = this.node.handlers.map(handler => {
+                const event_handler = new EventHandlerWrapper(handler, this);
+                let snippet = event_handler.get_snippet(block);
+                if (handler.modifiers.has('once'))
+                    snippet = x `@once(${snippet})`;
+                return b `${name}.$on("${handler.name}", ${snippet});`;
+            });
+            if (this.node.name === 'svelte:component') {
+                const switch_value = block.get_unique_name('switch_value');
+                const switch_props = block.get_unique_name('switch_props');
+                const snippet = this.node.expression.manipulate(block);
+                block.chunks.init.push(b `
+				var ${switch_value} = ${snippet};
+
+				function ${switch_props}(#ctx) {
+					${(this.node.attributes.length > 0 || this.node.bindings.length > 0) && b `
+					${props && b `let ${props} = ${attribute_object};`}`}
+					${statements}
+					return ${component_opts};
+				}
+
+				if (${switch_value}) {
+					${name} = new ${switch_value}(${switch_props}(#ctx));
+
+					${munged_bindings}
+					${munged_handlers}
+				}
+			`);
+                block.chunks.create.push(b `if (${name}) @create_component(${name}.$$.fragment);`);
+                if (parent_nodes && this.renderer.options.hydratable) {
+                    block.chunks.claim.push(b `if (${name}) @claim_component(${name}.$$.fragment, ${parent_nodes});`);
+                }
+                block.chunks.mount.push(b `
+				if (${name}) {
+					@mount_component(${name}, ${parent_node || '#target'}, ${parent_node ? 'null' : '#anchor'});
+				}
+			`);
+                const anchor = this.get_or_create_anchor(block, parent_node, parent_nodes);
+                const update_mount_node = this.get_update_mount_node(anchor);
+                if (updates.length) {
+                    block.chunks.update.push(b `
+					${updates}
+				`);
+                }
+                block.chunks.update.push(b `
+				if (${switch_value} !== (${switch_value} = ${snippet})) {
+					if (${name}) {
+						@group_outros();
+						const old_component = ${name};
+						@transition_out(old_component.$$.fragment, 1, 0, () => {
+							@destroy_component(old_component, 1);
+						});
+						@check_outros();
+					}
+
+					if (${switch_value}) {
+						${name} = new ${switch_value}(${switch_props}(#ctx));
+
+						${munged_bindings}
+						${munged_handlers}
+
+						@create_component(${name}.$$.fragment);
+						@transition_in(${name}.$$.fragment, 1);
+						@mount_component(${name}, ${update_mount_node}, ${anchor});
+					} else {
+						${name} = null;
+					}
+				} else if (${switch_value}) {
+					${updates.length > 0 && b `${name}.$set(${name_changes});`}
+				}
+			`);
+                block.chunks.intro.push(b `
+				if (${name}) @transition_in(${name}.$$.fragment, #local);
+			`);
+                block.chunks.outro.push(b `if (${name}) @transition_out(${name}.$$.fragment, #local);`);
+                block.chunks.destroy.push(b `if (${name}) @destroy_component(${name}, ${parent_node ? null : 'detaching'});`);
+            }
+            else {
+                const expression = this.node.name === 'svelte:self'
+                    ? component.name
+                    : this.renderer.reference(string_to_member_expression(this.node.name));
+                block.chunks.init.push(b `
+				${(this.node.attributes.length > 0 || this.node.bindings.length > 0) && b `
+				${props && b `let ${props} = ${attribute_object};`}`}
+				${statements}
+				${name} = new ${expression}(${component_opts});
+
+				${munged_bindings}
+				${munged_handlers}
+			`);
+                if (has_css_custom_properties) {
+                    block.chunks.create.push(b `${css_custom_properties_wrapper} = @element("div");`);
+                    block.chunks.hydrate.push(b `@set_style(${css_custom_properties_wrapper}, "display", "contents");`);
+                    this.node.css_custom_properties.forEach(attr => {
+                        const dependencies = attr.get_dependencies();
+                        const should_cache = attr.should_cache();
+                        const last = should_cache && block.get_unique_name(`${attr.name.replace(/[^a-zA-Z_$]/g, '_')}_last`);
+                        if (should_cache)
+                            block.add_variable(last);
+                        const value = attr.get_value(block);
+                        const init = should_cache ? x `${last} = ${value}` : value;
+                        block.chunks.hydrate.push(b `@set_style(${css_custom_properties_wrapper}, "${attr.name}", ${init});`);
+                        if (dependencies.length > 0) {
+                            let condition = block.renderer.dirty(dependencies);
+                            if (should_cache)
+                                condition = x `${condition} && (${last} !== (${last} = ${value}))`;
+                            block.chunks.update.push(b `
+							if (${condition}) {
+								@set_style(${css_custom_properties_wrapper}, "${attr.name}", ${should_cache ? last : value});
+							}
+						`);
+                        }
+                    });
+                }
+                block.chunks.create.push(b `@create_component(${name}.$$.fragment);`);
+                if (parent_nodes && this.renderer.options.hydratable) {
+                    let nodes = parent_nodes;
+                    if (has_css_custom_properties) {
+                        nodes = block.get_unique_name(`${css_custom_properties_wrapper.name}_nodes`);
+                        block.chunks.claim.push(b `
+						${css_custom_properties_wrapper} = @claim_element(${parent_nodes}, "DIV", { style: true })
+						var ${nodes} = @children(${css_custom_properties_wrapper});
+					`);
+                    }
+                    block.chunks.claim.push(b `@claim_component(${name}.$$.fragment, ${nodes});`);
+                }
+                if (has_css_custom_properties) {
+                    if (parent_node) {
+                        block.chunks.mount.push(b `@append(${parent_node}, ${css_custom_properties_wrapper})`);
+                        if (is_head(parent_node)) {
+                            block.chunks.destroy.push(b `@detach(${css_custom_properties_wrapper});`);
+                        }
+                    }
+                    else {
+                        block.chunks.mount.push(b `@insert(#target, ${css_custom_properties_wrapper}, #anchor);`);
+                        // TODO we eventually need to consider what happens to elements
+                        // that belong to the same outgroup as an outroing element...
+                        block.chunks.destroy.push(b `if (detaching) @detach(${css_custom_properties_wrapper});`);
+                    }
+                    block.chunks.mount.push(b `@mount_component(${name}, ${css_custom_properties_wrapper}, null);`);
+                }
+                else {
+                    block.chunks.mount.push(b `@mount_component(${name}, ${parent_node || '#target'}, ${parent_node ? 'null' : '#anchor'});`);
+                }
+                block.chunks.intro.push(b `
+				@transition_in(${name}.$$.fragment, #local);
+			`);
+                if (updates.length) {
+                    block.chunks.update.push(b `
+					${updates}
+					${name}.$set(${name_changes});
+				`);
+                }
+                block.chunks.destroy.push(b `
+				@destroy_component(${name}, ${parent_node ? null : 'detaching'});
+			`);
+                block.chunks.outro.push(b `@transition_out(${name}.$$.fragment, #local);`);
+            }
+        }
+    }
+
+    function get_slot_data(values, block = null) {
+        return {
+            type: 'ObjectExpression',
+            properties: Array.from(values.values())
+                .filter(attribute => attribute.name !== 'name')
+                .map(attribute => {
+                if (attribute.is_spread) {
+                    const argument = get_spread_value(block, attribute);
+                    return {
+                        type: 'SpreadElement',
+                        argument
+                    };
+                }
+                const value = get_value(block, attribute);
+                return p `${attribute.name}: ${value}`;
+            })
+        };
+    }
+    function get_value(block, attribute) {
+        if (attribute.is_true)
+            return x `true`;
+        if (attribute.chunks.length === 0)
+            return x `""`;
+        let value = attribute.chunks
+            .map(chunk => chunk.type === 'Text' ? string_literal(chunk.data) : (block ? chunk.manipulate(block) : chunk.node))
+            .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+        if (attribute.chunks.length > 1 && attribute.chunks[0].type !== 'Text') {
+            value = x `"" + ${value}`;
+        }
+        return value;
+    }
+    function get_spread_value(block, attribute) {
+        return block ? attribute.expression.manipulate(block) : attribute.expression.node;
+    }
+
+    class SlotWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, strip_whitespace, next_sibling) {
+            super(renderer, block, parent, node);
+            this.fallback = null;
+            this.var = { type: 'Identifier', name: 'slot' };
+            this.dependencies = new Set(['$$scope']);
+            this.cannot_use_innerhtml();
+            this.not_static_content();
+            if (this.node.children.length) {
+                this.fallback = block.child({
+                    comment: create_debugging_comment(this.node.children[0], this.renderer.component),
+                    name: this.renderer.component.get_unique_name('fallback_block'),
+                    type: 'fallback'
+                });
+                renderer.blocks.push(this.fallback);
+            }
+            this.fragment = new FragmentWrapper(renderer, this.fallback, node.children, this, strip_whitespace, next_sibling);
+            this.node.values.forEach(attribute => {
+                add_to_set(this.dependencies, attribute.dependencies);
+            });
+            block.add_dependencies(this.dependencies);
+            // we have to do this, just in case
+            block.add_intro();
+            block.add_outro();
+        }
+        render(block, parent_node, parent_nodes) {
+            const { renderer } = this;
+            const { slot_name } = this.node;
+            if (this.slot_block) {
+                block = this.slot_block;
+            }
+            let get_slot_changes_fn;
+            let get_slot_spread_changes_fn;
+            let get_slot_context_fn;
+            if (this.node.values.size > 0) {
+                get_slot_changes_fn = renderer.component.get_unique_name(`get_${sanitize(slot_name)}_slot_changes`);
+                get_slot_context_fn = renderer.component.get_unique_name(`get_${sanitize(slot_name)}_slot_context`);
+                const changes = x `{}`;
+                const spread_dynamic_dependencies = new Set();
+                this.node.values.forEach(attribute => {
+                    if (attribute.type === 'Spread') {
+                        add_to_set(spread_dynamic_dependencies, Array.from(attribute.dependencies).filter((name) => this.is_dependency_dynamic(name)));
+                    }
+                    else {
+                        const dynamic_dependencies = Array.from(attribute.dependencies).filter((name) => this.is_dependency_dynamic(name));
+                        if (dynamic_dependencies.length > 0) {
+                            changes.properties.push(p `${attribute.name}: ${renderer.dirty(dynamic_dependencies)}`);
+                        }
+                    }
+                });
+                renderer.blocks.push(b `
+				const ${get_slot_changes_fn} = #dirty => ${changes};
+				const ${get_slot_context_fn} = #ctx => ${get_slot_data(this.node.values, block)};
+			`);
+                if (spread_dynamic_dependencies.size) {
+                    get_slot_spread_changes_fn = renderer.component.get_unique_name(`get_${sanitize(slot_name)}_slot_spread_changes`);
+                    renderer.blocks.push(b `
+					const ${get_slot_spread_changes_fn} = #dirty => ${renderer.dirty(Array.from(spread_dynamic_dependencies))};
+				`);
+                }
+            }
+            else {
+                get_slot_changes_fn = 'null';
+                get_slot_context_fn = 'null';
+            }
+            let has_fallback = !!this.fallback;
+            if (this.fallback) {
+                this.fragment.render(this.fallback, null, x `#nodes`);
+                has_fallback = this.fallback.has_content();
+                if (!has_fallback) {
+                    renderer.remove_block(this.fallback);
+                }
+            }
+            const slot = block.get_unique_name(`${sanitize(slot_name)}_slot`);
+            const slot_definition = block.get_unique_name(`${sanitize(slot_name)}_slot_template`);
+            const slot_or_fallback = has_fallback ? block.get_unique_name(`${sanitize(slot_name)}_slot_or_fallback`) : slot;
+            block.chunks.init.push(b `
+			const ${slot_definition} = ${renderer.reference('#slots')}.${slot_name};
+			const ${slot} = @create_slot(${slot_definition}, #ctx, ${renderer.reference('$$scope')}, ${get_slot_context_fn});
+			${has_fallback ? b `const ${slot_or_fallback} = ${slot} || ${this.fallback.name}(#ctx);` : null}
+		`);
+            block.chunks.create.push(b `if (${slot_or_fallback}) ${slot_or_fallback}.c();`);
+            if (renderer.options.hydratable) {
+                block.chunks.claim.push(b `if (${slot_or_fallback}) ${slot_or_fallback}.l(${parent_nodes});`);
+            }
+            block.chunks.mount.push(b `
+			if (${slot_or_fallback}) {
+				${slot_or_fallback}.m(${parent_node || '#target'}, ${parent_node ? 'null' : '#anchor'});
+			}
+		`);
+            block.chunks.intro.push(b `@transition_in(${slot_or_fallback}, #local);`);
+            block.chunks.outro.push(b `@transition_out(${slot_or_fallback}, #local);`);
+            const dynamic_dependencies = Array.from(this.dependencies).filter((name) => this.is_dependency_dynamic(name));
+            const fallback_dynamic_dependencies = has_fallback
+                ? Array.from(this.fallback.dependencies).filter((name) => this.is_dependency_dynamic(name))
+                : [];
+            let condition = renderer.dirty(dynamic_dependencies);
+            if (block.has_outros) {
+                condition = x `!#current || ${condition}`;
+            }
+            // conditions to treat everything as dirty
+            const all_dirty_conditions = [
+                get_slot_spread_changes_fn ? x `${get_slot_spread_changes_fn}(#dirty)` : null,
+                block.has_outros ? x `!#current` : null
+            ].filter(Boolean);
+            const all_dirty_condition = all_dirty_conditions.length ? all_dirty_conditions.reduce((condition1, condition2) => x `${condition1} || ${condition2}`) : null;
+            let slot_update;
+            if (all_dirty_condition) {
+                const dirty = x `${all_dirty_condition} ? @get_all_dirty_from_scope(${renderer.reference('$$scope')}) : @get_slot_changes(${slot_definition}, ${renderer.reference('$$scope')}, #dirty, ${get_slot_changes_fn})`;
+                slot_update = b `
+				if (${slot}.p && ${condition}) {
+					@update_slot_base(${slot}, ${slot_definition}, #ctx, ${renderer.reference('$$scope')}, ${dirty}, ${get_slot_context_fn});
+				}
+			`;
+            }
+            else {
+                slot_update = b `
+				if (${slot}.p && ${condition}) {
+					@update_slot(${slot}, ${slot_definition}, #ctx, ${renderer.reference('$$scope')}, #dirty, ${get_slot_changes_fn}, ${get_slot_context_fn});
+				}
+			`;
+            }
+            let fallback_condition = renderer.dirty(fallback_dynamic_dependencies);
+            let fallback_dirty = x `#dirty`;
+            if (block.has_outros) {
+                fallback_condition = x `!#current || ${fallback_condition}`;
+                fallback_dirty = x `!#current ? ${renderer.get_initial_dirty()} : ${fallback_dirty}`;
+            }
+            const fallback_update = has_fallback && fallback_dynamic_dependencies.length > 0 && b `
+			if (${slot_or_fallback} && ${slot_or_fallback}.p && ${fallback_condition}) {
+				${slot_or_fallback}.p(#ctx, ${fallback_dirty});
+			}
+		`;
+            if (fallback_update) {
+                block.chunks.update.push(b `
+				if (${slot}) {
+					${slot_update}
+				} else {
+					${fallback_update}
+				}
+			`);
+            }
+            else {
+                block.chunks.update.push(b `
+				if (${slot}) {
+					${slot_update}
+				}
+			`);
+            }
+            block.chunks.destroy.push(b `if (${slot_or_fallback}) ${slot_or_fallback}.d(detaching);`);
+        }
+        is_dependency_dynamic(name) {
+            if (name === '$$scope')
+                return true;
+            if (this.node.scope.is_let(name))
+                return true;
+            if (is_reserved_keyword(name))
+                return true;
+            const variable = this.renderer.component.var_lookup.get(name);
+            return is_dynamic(variable);
+        }
+    }
+
+    class TitleWrapper extends Wrapper {
+        constructor(renderer, block, parent, node, _strip_whitespace, _next_sibling) {
+            super(renderer, block, parent, node);
+        }
+        render(block, _parent_node, _parent_nodes) {
+            const is_dynamic = !!this.node.children.find(node => node.type !== 'Text');
+            if (is_dynamic) {
+                let value;
+                const all_dependencies = new Set();
+                // TODO some of this code is repeated in Tag.ts — would be good to
+                // DRY it out if that's possible without introducing crazy indirection
+                if (this.node.children.length === 1) {
+                    // single {tag} — may be a non-string
+                    // @ts-ignore todo: check this
+                    const { expression } = this.node.children[0];
+                    value = expression.manipulate(block);
+                    add_to_set(all_dependencies, expression.dependencies);
+                }
+                else {
+                    // '{foo} {bar}' — treat as string concatenation
+                    value = this.node.children
+                        .map(chunk => {
+                        if (chunk.type === 'Text')
+                            return string_literal(chunk.data);
+                        chunk.expression.dependencies.forEach(d => {
+                            all_dependencies.add(d);
+                        });
+                        return chunk.expression.manipulate(block);
+                    })
+                        .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+                    if (this.node.children[0].type !== 'Text') {
+                        value = x `"" + ${value}`;
+                    }
+                }
+                const last = this.node.should_cache && block.get_unique_name('title_value');
+                if (this.node.should_cache)
+                    block.add_variable(last);
+                const init = this.node.should_cache ? x `${last} = ${value}` : value;
+                block.chunks.init.push(b `@_document.title = ${init};`);
+                const updater = b `@_document.title = ${this.node.should_cache ? last : value};`;
+                if (all_dependencies.size) {
+                    const dependencies = Array.from(all_dependencies);
+                    let condition = block.renderer.dirty(dependencies);
+                    if (block.has_outros) {
+                        condition = x `!#current || ${condition}`;
+                    }
+                    if (this.node.should_cache) {
+                        condition = x `${condition} && (${last} !== (${last} = ${value}))`;
+                    }
+                    block.chunks.update.push(b `
+					if (${condition}) {
+						${updater}
+					}`);
+                }
+            }
+            else {
+                const value = this.node.children.length > 0
+                    ? string_literal(this.node.children[0].data)
+                    : x `""`;
+                block.chunks.hydrate.push(b `@_document.title = ${value};`);
+            }
+        }
+    }
+
+    const associated_events = {
+        innerWidth: 'resize',
+        innerHeight: 'resize',
+        outerWidth: 'resize',
+        outerHeight: 'resize',
+        scrollX: 'scroll',
+        scrollY: 'scroll'
+    };
+    const properties$1 = {
+        scrollX: 'pageXOffset',
+        scrollY: 'pageYOffset'
+    };
+    const readonly = new Set([
+        'innerWidth',
+        'innerHeight',
+        'outerWidth',
+        'outerHeight',
+        'online'
+    ]);
+    class WindowWrapper extends Wrapper {
+        constructor(renderer, block, parent, node) {
+            super(renderer, block, parent, node);
+            this.handlers = this.node.handlers.map(handler => new EventHandlerWrapper(handler, this));
+        }
+        render(block, _parent_node, _parent_nodes) {
+            const { renderer } = this;
+            const { component } = renderer;
+            const events = {};
+            const bindings = {};
+            add_actions(block, '@_window', this.node.actions);
+            add_event_handlers(block, '@_window', this.handlers);
+            this.node.bindings.forEach(binding => {
+                // TODO: what if it's a MemberExpression?
+                const binding_name = binding.expression.node.name;
+                // in dev mode, throw if read-only values are written to
+                if (readonly.has(binding.name)) {
+                    renderer.readonly.add(binding_name);
+                }
+                bindings[binding.name] = binding_name;
+                // bind:online is a special case, we need to listen for two separate events
+                if (binding.name === 'online')
+                    return;
+                const associated_event = associated_events[binding.name];
+                const property = properties$1[binding.name] || binding.name;
+                if (!events[associated_event])
+                    events[associated_event] = [];
+                events[associated_event].push({
+                    name: binding_name,
+                    value: property
+                });
+            });
+            const scrolling = block.get_unique_name('scrolling');
+            const clear_scrolling = block.get_unique_name('clear_scrolling');
+            const scrolling_timeout = block.get_unique_name('scrolling_timeout');
+            Object.keys(events).forEach(event => {
+                const id = block.get_unique_name(`onwindow${event}`);
+                const props = events[event];
+                renderer.add_to_context(id.name);
+                const fn = renderer.reference(id.name);
+                if (event === 'scroll') {
+                    // TODO other bidirectional bindings...
+                    block.add_variable(scrolling, x `false`);
+                    block.add_variable(clear_scrolling, x `() => { ${scrolling} = false }`);
+                    block.add_variable(scrolling_timeout);
+                    const condition = bindings.scrollX && bindings.scrollY
+                        ? x `"${bindings.scrollX}" in this._state || "${bindings.scrollY}" in this._state`
+                        : x `"${bindings.scrollX || bindings.scrollY}" in this._state`;
+                    const scrollX = bindings.scrollX && x `this._state.${bindings.scrollX}`;
+                    const scrollY = bindings.scrollY && x `this._state.${bindings.scrollY}`;
+                    renderer.meta_bindings.push(b `
+					if (${condition}) {
+						@_scrollTo(${scrollX || '@_window.pageXOffset'}, ${scrollY || '@_window.pageYOffset'});
+					}
+					${scrollX && `${scrollX} = @_window.pageXOffset;`}
+					${scrollY && `${scrollY} = @_window.pageYOffset;`}
+				`);
+                    block.event_listeners.push(x `
+					@listen(@_window, "${event}", () => {
+						${scrolling} = true;
+						@_clearTimeout(${scrolling_timeout});
+						${scrolling_timeout} = @_setTimeout(${clear_scrolling}, 100);
+						${fn}();
+					})
+				`);
+                }
+                else {
+                    props.forEach(prop => {
+                        renderer.meta_bindings.push(b `this._state.${prop.name} = @_window.${prop.value};`);
+                    });
+                    block.event_listeners.push(x `
+					@listen(@_window, "${event}", ${fn})
+				`);
+                }
+                component.partly_hoisted.push(b `
+				function ${id}() {
+					${props.map(prop => renderer.invalidate(prop.name, x `${prop.name} = @_window.${prop.value}`))}
+				}
+			`);
+                block.chunks.init.push(b `
+				@add_render_callback(${fn});
+			`);
+                component.has_reactive_assignments = true;
+            });
+            // special case... might need to abstract this out if we add more special cases
+            if (bindings.scrollX || bindings.scrollY) {
+                const condition = renderer.dirty([bindings.scrollX, bindings.scrollY].filter(Boolean));
+                const scrollX = bindings.scrollX ? renderer.reference(bindings.scrollX) : x `@_window.pageXOffset`;
+                const scrollY = bindings.scrollY ? renderer.reference(bindings.scrollY) : x `@_window.pageYOffset`;
+                block.chunks.update.push(b `
+				if (${condition} && !${scrolling}) {
+					${scrolling} = true;
+					@_clearTimeout(${scrolling_timeout});
+					@_scrollTo(${scrollX}, ${scrollY});
+					${scrolling_timeout} = @_setTimeout(${clear_scrolling}, 100);
+				}
+			`);
+            }
+            // another special case. (I'm starting to think these are all special cases.)
+            if (bindings.online) {
+                const id = block.get_unique_name('onlinestatuschanged');
+                const name = bindings.online;
+                renderer.add_to_context(id.name);
+                const reference = renderer.reference(id.name);
+                component.partly_hoisted.push(b `
+				function ${id}() {
+					${renderer.invalidate(name, x `${name} = @_navigator.onLine`)}
+				}
+			`);
+                block.chunks.init.push(b `
+				@add_render_callback(${reference});
+			`);
+                block.event_listeners.push(x `@listen(@_window, "online", ${reference})`, x `@listen(@_window, "offline", ${reference})`);
+                component.has_reactive_assignments = true;
+            }
+        }
+    }
+
+    function link(next, prev) {
+        prev.next = next;
+        if (next)
+            next.prev = prev;
+    }
+
+    const wrappers = {
+        AwaitBlock: AwaitBlockWrapper,
+        Body: BodyWrapper,
+        Comment: null,
+        DebugTag: DebugTagWrapper,
+        EachBlock: EachBlockWrapper,
+        Element: ElementWrapper,
+        Head: HeadWrapper,
+        IfBlock: IfBlockWrapper,
+        InlineComponent: InlineComponentWrapper,
+        KeyBlock: KeyBlockWrapper,
+        MustacheTag: MustacheTagWrapper,
+        Options: null,
+        RawMustacheTag: RawMustacheTagWrapper,
+        Slot: SlotWrapper,
+        SlotTemplate: SlotTemplateWrapper,
+        Text: TextWrapper,
+        Title: TitleWrapper,
+        Window: WindowWrapper
+    };
+    function trimmable_at(child, next_sibling) {
+        // Whitespace is trimmable if one of the following is true:
+        // The child and its sibling share a common nearest each block (not at an each block boundary)
+        // The next sibling's previous node is an each block
+        return (next_sibling.node.find_nearest(/EachBlock/) === child.find_nearest(/EachBlock/)) || next_sibling.node.prev.type === 'EachBlock';
+    }
+    class FragmentWrapper {
+        constructor(renderer, block, nodes, parent, strip_whitespace, next_sibling) {
+            this.nodes = [];
+            let last_child;
+            let window_wrapper;
+            let i = nodes.length;
+            while (i--) {
+                const child = nodes[i];
+                if (!child.type) {
+                    throw new Error('missing type');
+                }
+                if (!(child.type in wrappers)) {
+                    throw new Error(`TODO implement ${child.type}`);
+                }
+                // special case — this is an easy way to remove whitespace surrounding
+                // <svelte:window/>. lil hacky but it works
+                if (child.type === 'Window') {
+                    window_wrapper = new WindowWrapper(renderer, block, parent, child);
+                    continue;
+                }
+                if (child.type === 'Text') {
+                    let { data } = child;
+                    // We want to remove trailing whitespace inside an element/component/block,
+                    // *unless* there is no whitespace between this node and its next sibling
+                    if (this.nodes.length === 0) {
+                        const should_trim = (next_sibling ? (next_sibling.node.type === 'Text' && /^\s/.test(next_sibling.node.data) && trimmable_at(child, next_sibling)) : !child.has_ancestor('EachBlock'));
+                        if (should_trim && !child.keep_space()) {
+                            data = trim_end(data);
+                            if (!data)
+                                continue;
+                        }
+                    }
+                    // glue text nodes (which could e.g. be separated by comments) together
+                    if (last_child && last_child.node.type === 'Text') {
+                        last_child.data = data + last_child.data;
+                        continue;
+                    }
+                    const wrapper = new TextWrapper(renderer, block, parent, child, data);
+                    if (wrapper.skip)
+                        continue;
+                    this.nodes.unshift(wrapper);
+                    link(last_child, last_child = wrapper);
+                }
+                else {
+                    const Wrapper = wrappers[child.type];
+                    if (!Wrapper)
+                        continue;
+                    const wrapper = new Wrapper(renderer, block, parent, child, strip_whitespace, last_child || next_sibling);
+                    this.nodes.unshift(wrapper);
+                    link(last_child, last_child = wrapper);
+                }
+            }
+            if (strip_whitespace) {
+                const first = this.nodes[0];
+                if (first && first.node.type === 'Text' && !first.node.keep_space()) {
+                    first.data = trim_start(first.data);
+                    if (!first.data) {
+                        first.var = null;
+                        this.nodes.shift();
+                        if (this.nodes[0]) {
+                            this.nodes[0].prev = null;
+                        }
+                    }
+                }
+            }
+            if (window_wrapper) {
+                this.nodes.unshift(window_wrapper);
+                link(last_child, window_wrapper);
+            }
+        }
+        render(block, parent_node, parent_nodes) {
+            for (let i = 0; i < this.nodes.length; i += 1) {
+                this.nodes[i].render(block, parent_node, parent_nodes);
+            }
+        }
+    }
+
+    class Renderer {
+        constructor(component, options) {
+            this.context = [];
+            this.initial_context = [];
+            this.context_lookup = new Map();
+            this.blocks = [];
+            this.readonly = new Set();
+            this.meta_bindings = []; // initial values for e.g. window.innerWidth, if there's a <svelte:window> meta tag
+            this.binding_groups = new Map();
+            this.component = component;
+            this.options = options;
+            this.locate = component.locate; // TODO messy
+            this.file_var = options.dev && this.component.get_unique_name('file');
+            component.vars.filter(v => !v.hoistable || (v.export_name && !v.module)).forEach(v => this.add_to_context(v.name));
+            // ensure store values are included in context
+            component.vars.filter(v => v.subscribable).forEach(v => this.add_to_context(`$${v.name}`));
+            reserved_keywords.forEach(keyword => {
+                if (component.var_lookup.has(keyword)) {
+                    this.add_to_context(keyword);
+                }
+            });
+            if (component.slots.size > 0) {
+                this.add_to_context('$$scope');
+                this.add_to_context('#slots');
+            }
+            if (this.binding_groups.size > 0) {
+                this.add_to_context('$$binding_groups');
+            }
+            // main block
+            this.block = new Block$1({
+                renderer: this,
+                name: null,
+                type: 'component',
+                key: null,
+                bindings: new Map(),
+                dependencies: new Set()
+            });
+            this.block.has_update_method = true;
+            this.fragment = new FragmentWrapper(this, this.block, component.fragment.children, null, true, null);
+            // TODO messy
+            this.blocks.forEach(block => {
+                if (block instanceof Block$1) {
+                    block.assign_variable_names();
+                }
+            });
+            this.block.assign_variable_names();
+            this.fragment.render(this.block, null, x `#nodes`);
+            this.context_overflow = this.context.length > 31;
+            this.context.forEach(member => {
+                const { variable } = member;
+                if (variable) {
+                    member.priority += 2;
+                    if (variable.mutated || variable.reassigned)
+                        member.priority += 4;
+                    // these determine whether variable is included in initial context
+                    // array, so must have the highest priority
+                    if (variable.is_reactive_dependency && (variable.mutated || variable.reassigned))
+                        member.priority += 16;
+                    if (variable.export_name)
+                        member.priority += 32;
+                    if (variable.referenced)
+                        member.priority += 64;
+                }
+                else if (member.is_non_contextual) {
+                    // determine whether variable is included in initial context
+                    // array, so must have the highest priority
+                    member.priority += 8;
+                }
+                if (!member.is_contextual) {
+                    member.priority += 1;
+                }
+            });
+            this.context.sort((a, b) => (b.priority - a.priority) || (a.index.value - b.index.value));
+            this.context.forEach((member, i) => member.index.value = i);
+            let i = this.context.length;
+            while (i--) {
+                const member = this.context[i];
+                if (member.variable) {
+                    if (member.variable.referenced || member.variable.export_name || (member.variable.is_reactive_dependency && (member.variable.mutated || member.variable.reassigned)))
+                        break;
+                }
+                else if (member.is_non_contextual) {
+                    break;
+                }
+            }
+            this.initial_context = this.context.slice(0, i + 1);
+        }
+        add_to_context(name, contextual = false) {
+            if (!this.context_lookup.has(name)) {
+                const member = {
+                    name,
+                    index: { type: 'Literal', value: this.context.length },
+                    is_contextual: false,
+                    is_non_contextual: false,
+                    variable: null,
+                    priority: 0
+                };
+                this.context_lookup.set(name, member);
+                this.context.push(member);
+            }
+            const member = this.context_lookup.get(name);
+            if (contextual) {
+                member.is_contextual = true;
+            }
+            else {
+                member.is_non_contextual = true;
+                member.variable = this.component.var_lookup.get(name);
+            }
+            return member;
+        }
+        invalidate(name, value, main_execution_context = false) {
+            return renderer_invalidate(this, name, value, main_execution_context);
+        }
+        dirty(names, is_reactive_declaration = false) {
+            const renderer = this;
+            const dirty = (is_reactive_declaration
+                ? x `$$self.$$.dirty`
+                : x `#dirty`);
+            const get_bitmask = () => {
+                const bitmask = [];
+                names.forEach((name) => {
+                    const member = renderer.context_lookup.get(name);
+                    if (!member)
+                        return;
+                    if (member.index.value === -1) {
+                        throw new Error('unset index');
+                    }
+                    const value = member.index.value;
+                    const i = (value / 31) | 0;
+                    const n = 1 << (value % 31);
+                    if (!bitmask[i])
+                        bitmask[i] = { n: 0, names: [] };
+                    bitmask[i].n |= n;
+                    bitmask[i].names.push(name);
+                });
+                return bitmask;
+            };
+            // TODO: context-overflow make it less gross
+            return {
+                // Using a ParenthesizedExpression allows us to create
+                // the expression lazily. TODO would be better if
+                // context was determined before rendering, so that
+                // this indirection was unnecessary
+                type: 'ParenthesizedExpression',
+                get expression() {
+                    const bitmask = get_bitmask();
+                    if (!bitmask.length) {
+                        return x `${dirty} & /*${names.join(', ')}*/ 0`;
+                    }
+                    if (renderer.context_overflow) {
+                        return bitmask
+                            .map((b, i) => ({ b, i }))
+                            .filter(({ b }) => b)
+                            .map(({ b, i }) => x `${dirty}[${i}] & /*${b.names.join(', ')}*/ ${b.n}`)
+                            .reduce((lhs, rhs) => x `${lhs} | ${rhs}`);
+                    }
+                    return x `${dirty} & /*${names.join(', ')}*/ ${bitmask[0].n}`;
+                }
+            };
+        }
+        // NOTE: this method may be called before this.context_overflow / this.context is fully defined
+        // therefore, they can only be evaluated later in a getter function
+        get_initial_dirty() {
+            const _this = this;
+            // TODO: context-overflow make it less gross
+            const val = x `-1`;
+            return {
+                get type() {
+                    return _this.context_overflow ? 'ArrayExpression' : 'UnaryExpression';
+                },
+                // as [-1]
+                get elements() {
+                    const elements = [];
+                    for (let i = 0; i < _this.context.length; i += 31) {
+                        elements.push(val);
+                    }
+                    return elements;
+                },
+                // as -1
+                operator: val.operator,
+                prefix: val.prefix,
+                argument: val.argument
+            };
+        }
+        reference(node, ctx = '#ctx') {
+            if (typeof node === 'string') {
+                node = { type: 'Identifier', name: node };
+            }
+            const { name, nodes } = flatten_reference(node);
+            const member = this.context_lookup.get(name);
+            // TODO is this correct?
+            if (this.component.var_lookup.get(name)) {
+                this.component.add_reference(node, name);
+            }
+            if (member !== undefined) {
+                const replacement = x `/*${member.name}*/ ${ctx}[${member.index}]`;
+                if (nodes[0].loc)
+                    replacement.object.loc = nodes[0].loc;
+                nodes[0] = replacement;
+                return nodes.reduce((lhs, rhs) => x `${lhs}.${rhs}`);
+            }
+            return node;
+        }
+        remove_block(block) {
+            this.blocks.splice(this.blocks.indexOf(block), 1);
+        }
+    }
 
     var charToInteger$1 = {};
     var chars$1 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
     for (var i$2 = 0; i$2 < chars$1.length; i$2++) {
         charToInteger$1[chars$1.charCodeAt(i$2)] = i$2;
     }
+    function decode$1(mappings) {
+        var decoded = [];
+        var line = [];
+        var segment = [
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        var j = 0;
+        for (var i = 0, shift = 0, value = 0; i < mappings.length; i++) {
+            var c = mappings.charCodeAt(i);
+            if (c === 44) { // ","
+                segmentify$1(line, segment, j);
+                j = 0;
+            }
+            else if (c === 59) { // ";"
+                segmentify$1(line, segment, j);
+                j = 0;
+                decoded.push(line);
+                line = [];
+                segment[0] = 0;
+            }
+            else {
+                var integer = charToInteger$1[c];
+                if (integer === undefined) {
+                    throw new Error('Invalid character (' + String.fromCharCode(c) + ')');
+                }
+                var hasContinuationBit = integer & 32;
+                integer &= 31;
+                value += integer << shift;
+                if (hasContinuationBit) {
+                    shift += 5;
+                }
+                else {
+                    var shouldNegate = value & 1;
+                    value >>>= 1;
+                    if (shouldNegate) {
+                        value = value === 0 ? -0x80000000 : -value;
+                    }
+                    segment[j] += value;
+                    j++;
+                    value = shift = 0; // reset
+                }
+            }
+        }
+        segmentify$1(line, segment, j);
+        decoded.push(line);
+        return decoded;
+    }
+    function segmentify$1(line, segment, j) {
+        // This looks ugly, but we're creating specialized arrays with a specific
+        // length. This is much faster than creating a new array (which v8 expands to
+        // a capacity of 17 after pushing the first item), or slicing out a subarray
+        // (which is slow). Length 4 is assumed to be the most frequent, followed by
+        // length 5 (since not everything will have an associated name), followed by
+        // length 1 (it's probably rare for a source substring to not have an
+        // associated segment data).
+        if (j === 4)
+            line.push([segment[0], segment[1], segment[2], segment[3]]);
+        else if (j === 5)
+            line.push([segment[0], segment[1], segment[2], segment[3], segment[4]]);
+        else if (j === 1)
+            line.push([segment[0]]);
+    }
+    function encode$1(decoded) {
+        var sourceFileIndex = 0; // second field
+        var sourceCodeLine = 0; // third field
+        var sourceCodeColumn = 0; // fourth field
+        var nameIndex = 0; // fifth field
+        var mappings = '';
+        for (var i = 0; i < decoded.length; i++) {
+            var line = decoded[i];
+            if (i > 0)
+                mappings += ';';
+            if (line.length === 0)
+                continue;
+            var generatedCodeColumn = 0; // first field
+            var lineMappings = [];
+            for (var _i = 0, line_1 = line; _i < line_1.length; _i++) {
+                var segment = line_1[_i];
+                var segmentMappings = encodeInteger$1(segment[0] - generatedCodeColumn);
+                generatedCodeColumn = segment[0];
+                if (segment.length > 1) {
+                    segmentMappings +=
+                        encodeInteger$1(segment[1] - sourceFileIndex) +
+                            encodeInteger$1(segment[2] - sourceCodeLine) +
+                            encodeInteger$1(segment[3] - sourceCodeColumn);
+                    sourceFileIndex = segment[1];
+                    sourceCodeLine = segment[2];
+                    sourceCodeColumn = segment[3];
+                }
+                if (segment.length === 5) {
+                    segmentMappings += encodeInteger$1(segment[4] - nameIndex);
+                    nameIndex = segment[4];
+                }
+                lineMappings.push(segmentMappings);
+            }
+            mappings += lineMappings.join(',');
+        }
+        return mappings;
+    }
+    function encodeInteger$1(num) {
+        var result = '';
+        num = num < 0 ? (-num << 1) | 1 : num << 1;
+        do {
+            var clamped = num & 31;
+            num >>>= 5;
+            if (num > 0) {
+                clamped |= 32;
+            }
+            result += chars$1[clamped];
+        } while (num > 0);
+        return result;
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * Creates a brand new (prototype-less) object with the enumerable-own
+     * properties of `target`. Any enumerable-own properties from `source` which
+     * are not present on `target` will be copied as well.
+     */
+    function defaults(target, source) {
+        return Object.assign(Object.create(null), source, target);
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * Decodes an input sourcemap into a `DecodedSourceMap` sourcemap object.
+     *
+     * Valid input maps include a `DecodedSourceMap`, a `RawSourceMap`, or JSON
+     * representations of either type.
+     */
+    function decodeSourceMap(map) {
+        if (typeof map === 'string') {
+            map = JSON.parse(map);
+        }
+        let { mappings } = map;
+        if (typeof mappings === 'string') {
+            mappings = decode$1(mappings);
+        }
+        else {
+            // Clone the Line so that we can sort it. We don't want to mutate an array
+            // that we don't own directly.
+            mappings = mappings.map(cloneSegmentLine);
+        }
+        // Sort each Line's segments. There's no guarantee that segments are sorted for us,
+        // and even Chrome's implementation sorts:
+        // https://cs.chromium.org/chromium/src/third_party/devtools-frontend/src/front_end/sdk/SourceMap.js?l=507-508&rcl=109232bcf479c8f4ef8ead3cf56c49eb25f8c2f0
+        mappings.forEach(sortSegments);
+        return defaults({ mappings }, map);
+    }
+    function cloneSegmentLine(segments) {
+        return segments.slice();
+    }
+    function sortSegments(segments) {
+        segments.sort(segmentComparator);
+    }
+    function segmentComparator(a, b) {
+        return a[0] - b[0];
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * A "leaf" node in the sourcemap tree, representing an original, unmodified
+     * source file. Recursive segment tracing ends at the `OriginalSource`.
+     */
+    class OriginalSource {
+        constructor(filename, content) {
+            this.filename = filename;
+            this.content = content;
+        }
+        /**
+         * Tracing a `SourceMapSegment` ends when we get to an `OriginalSource`,
+         * meaning this line/column location originated from this source file.
+         */
+        traceSegment(line, column, name) {
+            return { column, line, name, source: this };
+        }
+    }
 
     /* istanbul ignore next */
-    (typeof URL !== 'undefined' ? URL : require('url').URL);
+    const Url$1 = (typeof URL !== 'undefined' ? URL : require('url').URL);
+    // Matches "..", which must be preceeded by "/" or the start of the string, and
+    // must be followed by a "/". We do not eat the following "/", so that the next
+    // iteration can match on it.
+    const parentRegex = /(^|\/)\.\.(?=\/|$)/g;
+    function isAbsoluteUrl(url) {
+        try {
+            return !!new Url$1(url);
+        }
+        catch (e) {
+            return false;
+        }
+    }
+    /**
+     * Creates a directory name that is guaranteed to not be in `str`.
+     */
+    function uniqInStr(str) {
+        let uniq = String(Math.random()).slice(2);
+        while (str.indexOf(uniq) > -1) {
+            /* istanbul ignore next */
+            uniq += uniq;
+        }
+        return uniq;
+    }
+    /**
+     * Removes the filename from the path (everything trailing the last "/"). This
+     * is only safe to call on a path, never call with an absolute or protocol
+     * relative URL.
+     */
+    function stripPathFilename(path) {
+        path = normalizePath(path);
+        const index = path.lastIndexOf('/');
+        return path.slice(0, index + 1);
+    }
+    /**
+     * Normalizes a protocol-relative URL, but keeps it protocol relative by
+     * stripping out the protocl before returning it.
+     */
+    function normalizeProtocolRelative(input, absoluteBase) {
+        const { href, protocol } = new Url$1(input, absoluteBase);
+        return href.slice(protocol.length);
+    }
+    /**
+     * Normalizes a simple path (one that has no ".."s, or is absolute so ".."s can
+     * be normalized absolutely).
+     */
+    function normalizeSimplePath(input) {
+        const { href } = new Url$1(input, 'https://foo.com/');
+        return href.slice('https://foo.com/'.length);
+    }
+    /**
+     * Normalizes a path, ensuring that excess ".."s are preserved for relative
+     * paths in the output.
+     *
+     * If the input is absolute, this will return an absolutey normalized path, but
+     * it will not have a leading "/".
+     *
+     * If the input has a leading "..", the output will have a leading "..".
+     *
+     * If the input has a leading ".", the output will not have a leading "."
+     * unless there are too many ".."s, in which case there will be a leading "..".
+     */
+    function normalizePath(input) {
+        // If there are no ".."s, we can treat this as if it were an absolute path.
+        // The return won't be an absolute path, so it's easy.
+        if (!parentRegex.test(input))
+            return normalizeSimplePath(input);
+        // We already found one "..". Let's see how many there are.
+        let total = 1;
+        while (parentRegex.test(input))
+            total++;
+        // If there are ".."s, we need to prefix the the path with the same number of
+        // unique directories. This is to ensure that we "remember" how many parent
+        // directories we are accessing. Eg, "../../.." must keep 3, and "foo/../.."
+        // must keep 1.
+        const uniqDirectory = `z${uniqInStr(input)}/`;
+        // uniqDirectory is just a "z", followed by numbers, followed by a "/". So
+        // generating a runtime regex from it is safe. We'll use this search regex to
+        // strip out our uniq directory names and insert any needed ".."s.
+        const search = new RegExp(`^(?:${uniqDirectory})*`);
+        // Now we can resolve the total path. If there are excess ".."s, they will
+        // eliminate one or more of the unique directories we prefix with.
+        const relative = normalizeSimplePath(uniqDirectory.repeat(total) + input);
+        // We can now count the number of unique directories that were eliminated. If
+        // there were 3, and 1 was eliminated, we know we only need to add 1 "..". If
+        // 2 were eliminated, we need to insert 2 ".."s. If all 3 were eliminated,
+        // then we need 3, etc. This replace is guranteed to match (it may match 0 or
+        // more times), and we can count the total match to see how many were eliminated.
+        return relative.replace(search, (all) => {
+            const leftover = all.length / uniqDirectory.length;
+            return '../'.repeat(total - leftover);
+        });
+    }
+    /**
+     * Attempts to resolve `input` URL relative to `base`.
+     */
+    function resolve(input, base) {
+        if (!base)
+            base = '';
+        // Absolute URLs are very easy to resolve right.
+        if (isAbsoluteUrl(input))
+            return new Url$1(input).href;
+        if (base) {
+            // Absolute URLs are easy...
+            if (isAbsoluteUrl(base))
+                return new Url$1(input, base).href;
+            // If base is protocol relative, we'll resolve with it but keep the result
+            // protocol relative.
+            if (base.startsWith('//'))
+                return normalizeProtocolRelative(input, `https:${base}`);
+        }
+        // Normalize input, but keep it protocol relative. We know base doesn't supply
+        // a protocol, because that would have been handled above.
+        if (input.startsWith('//'))
+            return normalizeProtocolRelative(input, 'https://foo.com/');
+        // We now know that base (if there is one) and input are paths. We've handled
+        // both absolute and protocol-relative variations above.
+        // Absolute paths don't need any special handling, because they cannot have
+        // extra "." or ".."s. That'll all be stripped away. Input takes priority here,
+        // because if input is an absolute path, base path won't affect it in any way.
+        if (input.startsWith('/'))
+            return '/' + normalizeSimplePath(input);
+        // Since input and base are paths, we need to join them to do any further
+        // processing. Paths are joined at the directory level, so we need to remove
+        // the base's filename before joining. We also know that input does not have a
+        // leading slash, and that the stripped base will have a trailing slash if
+        // there are any directories (or it'll be empty).
+        const joined = stripPathFilename(base) + input;
+        // If base is an absolute path, then input will be relative to it.
+        if (base.startsWith('/'))
+            return '/' + normalizeSimplePath(joined);
+        // We now know both base (if there is one) and input are relative paths.
+        const relative = normalizePath(joined);
+        // If base started with a leading ".", or there is no base and input started
+        // with a ".", then we need to ensure that the relative path starts with a
+        // ".". We don't know if relative starts with a "..", though, so check before
+        // prepending.
+        if ((base || input).startsWith('.') && !relative.startsWith('.')) {
+            return './' + relative;
+        }
+        return relative;
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    function resolve$1(input, base) {
+        // The base is always treated as a directory, if it's not empty.
+        // https://github.com/mozilla/source-map/blob/8cb3ee57/lib/util.js#L327
+        // https://github.com/chromium/chromium/blob/da4adbb3/third_party/blink/renderer/devtools/front_end/sdk/SourceMap.js#L400-L401
+        if (base && !base.endsWith('/'))
+            base += '/';
+        return resolve(input, base);
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * A binary search implementation that returns the index if a match is found,
+     * or the negated index of where the `needle` should be inserted.
+     *
+     * The `comparator` callback receives both the `item` under comparison and the
+     * needle we are searching for. It must return `0` if the `item` is a match,
+     * any negative number if `item` is too small (and we must search after it), or
+     * any positive number if the `item` is too large (and we must search before
+     * it).
+     *
+     * If no match is found, a negated index of where to insert the `needle` is
+     * returned. This negated index is guaranteed to be less than 0. To insert an
+     * item, negate it (again) and splice:
+     *
+     * ```js
+     * const array = [1, 3];
+     * const needle = 2;
+     * const index = binarySearch(array, needle, (item, needle) => item - needle);
+     *
+     * assert.equal(index, -2);
+     * assert.equal(~index, 1);
+     * array.splice(~index, 0, needle);
+     * assert.deepEqual(array, [1, 2, 3]);
+     * ```
+     */
+    function binarySearch(haystack, needle, comparator) {
+        let low = 0;
+        let high = haystack.length - 1;
+        while (low <= high) {
+            const mid = low + ((high - low) >> 1);
+            const cmp = comparator(haystack[mid], needle);
+            if (cmp === 0) {
+                return mid;
+            }
+            if (cmp < 0) {
+                low = mid + 1;
+            }
+            else {
+                high = mid - 1;
+            }
+        }
+        return ~low;
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * FastStringArray acts like a `Set` (allowing only one occurrence of a string
+     * `key`), but provides the index of the `key` in the backing array.
+     *
+     * This is designed to allow synchronizing a second array with the contents of
+     * the backing array, like how `sourcesContent[i]` is the source content
+     * associated with `source[i]`, and there are never duplicates.
+     */
+    class FastStringArray {
+        constructor() {
+            this.indexes = Object.create(null);
+            this.array = [];
+        }
+        /**
+         * Puts `key` into the backing array, if it is not already present. Returns
+         * the index of the `key` in the backing array.
+         */
+        put(key) {
+            const { array, indexes } = this;
+            // The key may or may not be present. If it is present, it's a number.
+            let index = indexes[key];
+            // If it's not yet present, we need to insert it and track the index in the
+            // indexes.
+            if (index === undefined) {
+                index = indexes[key] = array.length;
+                array.push(key);
+            }
+            return index;
+        }
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * SourceMapTree represents a single sourcemap, with the ability to trace
+     * mappings into its child nodes (which may themselves be SourceMapTrees).
+     */
+    class SourceMapTree {
+        constructor(map, sources) {
+            this.map = map;
+            this.sources = sources;
+        }
+        /**
+         * traceMappings is only called on the root level SourceMapTree, and begins
+         * the process of resolving each mapping in terms of the original source
+         * files.
+         */
+        traceMappings() {
+            const mappings = [];
+            const names = new FastStringArray();
+            const sources = new FastStringArray();
+            const sourcesContent = [];
+            const { mappings: rootMappings, names: rootNames } = this.map;
+            for (let i = 0; i < rootMappings.length; i++) {
+                const segments = rootMappings[i];
+                const tracedSegments = [];
+                for (let j = 0; j < segments.length; j++) {
+                    const segment = segments[j];
+                    // 1-length segments only move the current generated column, there's no
+                    // source information to gather from it.
+                    if (segment.length === 1)
+                        continue;
+                    const source = this.sources[segment[1]];
+                    const traced = source.traceSegment(segment[2], segment[3], segment.length === 5 ? rootNames[segment[4]] : '');
+                    if (!traced)
+                        continue;
+                    // So we traced a segment down into its original source file. Now push a
+                    // new segment pointing to this location.
+                    const { column, line, name } = traced;
+                    const { content, filename } = traced.source;
+                    // Store the source location, and ensure we keep sourcesContent up to
+                    // date with the sources array.
+                    const sourceIndex = sources.put(filename);
+                    sourcesContent[sourceIndex] = content;
+                    // This looks like unnecessary duplication, but it noticeably increases
+                    // performance. If we were to push the nameIndex onto length-4 array, v8
+                    // would internally allocate 22 slots! That's 68 wasted bytes! Array
+                    // literals have the same capacity as their length, saving memory.
+                    if (name) {
+                        tracedSegments.push([segment[0], sourceIndex, line, column, names.put(name)]);
+                    }
+                    else {
+                        tracedSegments.push([segment[0], sourceIndex, line, column]);
+                    }
+                }
+                mappings.push(tracedSegments);
+            }
+            // TODO: Make all sources relative to the sourceRoot.
+            return defaults({
+                mappings,
+                names: names.array,
+                sources: sources.array,
+                sourcesContent,
+            }, this.map);
+        }
+        /**
+         * traceSegment is only called on children SourceMapTrees. It recurses down
+         * into its own child SourceMapTrees, until we find the original source map.
+         */
+        traceSegment(line, column, name) {
+            const { mappings, names } = this.map;
+            // It's common for parent sourcemaps to have pointers to lines that have no
+            // mapping (like a "//# sourceMappingURL=") at the end of the child file.
+            if (line >= mappings.length)
+                return null;
+            const segments = mappings[line];
+            if (segments.length === 0)
+                return null;
+            let index = binarySearch(segments, column, segmentComparator$1);
+            if (index === -1)
+                return null; // we come before any mapped segment
+            // If we can't find a segment that lines up to this column, we use the
+            // segment before.
+            if (index < 0) {
+                index = ~index - 1;
+            }
+            const segment = segments[index];
+            // 1-length segments only move the current generated column, there's no
+            // source information to gather from it.
+            if (segment.length === 1)
+                return null;
+            const source = this.sources[segment[1]];
+            // So now we can recurse down, until we hit the original source file.
+            return source.traceSegment(segment[2], segment[3], 
+            // A child map's recorded name for this segment takes precedence over the
+            // parent's mapped name. Imagine a mangler changing the name over, etc.
+            segment.length === 5 ? names[segment[4]] : name);
+        }
+    }
+    function segmentComparator$1(segment, column) {
+        return segment[0] - column;
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * Removes the filename from a path.
+     */
+    function stripFilename(path) {
+        if (!path)
+            return '';
+        const index = path.lastIndexOf('/');
+        return path.slice(0, index + 1);
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    function asArray(value) {
+        if (Array.isArray(value))
+            return value;
+        return [value];
+    }
+    /**
+     * Recursively builds a tree structure out of sourcemap files, with each node
+     * being either an `OriginalSource` "leaf" or a `SourceMapTree` composed of
+     * `OriginalSource`s and `SourceMapTree`s.
+     *
+     * Every sourcemap is composed of a collection of source files and mappings
+     * into locations of those source files. When we generate a `SourceMapTree` for
+     * the sourcemap, we attempt to load each source file's own sourcemap. If it
+     * does not have an associated sourcemap, it is considered an original,
+     * unmodified source file.
+     */
+    function buildSourceMapTree(input, loader, relativeRoot) {
+        const maps = asArray(input).map(decodeSourceMap);
+        const map = maps.pop();
+        for (let i = 0; i < maps.length; i++) {
+            if (maps[i].sources.length !== 1) {
+                throw new Error(`Transformation map ${i} must have exactly one source file.\n` +
+                    'Did you specify these with the most recent transformation maps first?');
+            }
+        }
+        const { sourceRoot, sources, sourcesContent } = map;
+        const children = sources.map((sourceFile, i) => {
+            // Each source file is loaded relative to the sourcemap's own sourceRoot,
+            // which is itself relative to the sourcemap's parent.
+            const uri = resolve$1(sourceFile || '', resolve$1(sourceRoot || '', stripFilename(relativeRoot)));
+            // Use the provided loader callback to retrieve the file's sourcemap.
+            // TODO: We should eventually support async loading of sourcemap files.
+            const sourceMap = loader(uri);
+            // If there is no sourcemap, then it is an unmodified source file.
+            if (!sourceMap) {
+                // The source file's actual contents must be included in the sourcemap
+                // (done when generating the sourcemap) for it to be included as a
+                // sourceContent in the output sourcemap.
+                const sourceContent = sourcesContent ? sourcesContent[i] : null;
+                return new OriginalSource(uri, sourceContent);
+            }
+            // Else, it's a real sourcemap, and we need to recurse into it to load its
+            // source files.
+            return buildSourceMapTree(decodeSourceMap(sourceMap), loader, uri);
+        });
+        let tree = new SourceMapTree(map, children);
+        for (let i = maps.length - 1; i >= 0; i--) {
+            tree = new SourceMapTree(maps[i], [tree]);
+        }
+        return tree;
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * A SourceMap v3 compatible sourcemap, which only includes fields that were
+     * provided to it.
+     */
+    class SourceMap {
+        constructor(map, excludeContent) {
+            this.version = 3; // SourceMap spec says this should be first.
+            if ('file' in map)
+                this.file = map.file;
+            this.mappings = encode$1(map.mappings);
+            this.names = map.names;
+            // TODO: We first need to make all source URIs relative to the sourceRoot
+            // before we can support a sourceRoot.
+            // if ('sourceRoot' in map) this.sourceRoot = map.sourceRoot;
+            this.sources = map.sources;
+            if (!excludeContent && 'sourcesContent' in map)
+                this.sourcesContent = map.sourcesContent;
+        }
+        toString() {
+            return JSON.stringify(this);
+        }
+    }
+
+    /**
+     * Copyright 2019 The AMP HTML Authors. All Rights Reserved.
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    /**
+     * Traces through all the mappings in the root sourcemap, through the sources
+     * (and their sourcemaps), all the way back to the original source location.
+     *
+     * `loader` will be called every time we encounter a source file. If it returns
+     * a sourcemap, we will recurse into that sourcemap to continue the trace. If
+     * it returns a falsey value, that source file is treated as an original,
+     * unmodified source file.
+     *
+     * Pass `excludeContent` content to exclude any self-containing source file
+     * content from the output sourcemap.
+     */
+    function remapping(input, loader, excludeContent) {
+        const graph = buildSourceMapTree(input, loader);
+        return new SourceMap(graph.traceMappings(), !!excludeContent);
+    }
+    function combine_sourcemaps(filename, sourcemap_list) {
+        if (sourcemap_list.length == 0)
+            return null;
+        let map_idx = 1;
+        const map = sourcemap_list.slice(0, -1)
+            .find(m => m.sources.length !== 1) === undefined
+            ? remapping(// use array interface
+            // only the oldest sourcemap can have multiple sources
+            sourcemap_list, () => null, true // skip optional field `sourcesContent`
+            )
+            : remapping(// use loader interface
+            sourcemap_list[0], // last map
+            function loader(sourcefile) {
+                if (sourcefile === filename && sourcemap_list[map_idx]) {
+                    return sourcemap_list[map_idx++]; // idx 1, 2, ...
+                    // bundle file = branch node
+                }
+                else {
+                    return null; // source file = leaf node
+                }
+            }, true);
+        if (!map.file)
+            delete map.file; // skip optional field `file`
+        // When source maps are combined and the leading map is empty, sources is not set.
+        // Add the filename to the empty array in this case. 
+        // Further improvements to remapping may help address this as well https://github.com/ampproject/remapping/issues/116
+        if (!map.sources.length)
+            map.sources = [filename];
+        return map;
+    }
+    // browser vs node.js
+    const b64enc = typeof btoa == 'function' ? btoa : b => Buffer.from(b).toString('base64');
+    function apply_preprocessor_sourcemap(filename, svelte_map, preprocessor_map_input) {
+        if (!svelte_map || !preprocessor_map_input)
+            return svelte_map;
+        const preprocessor_map = typeof preprocessor_map_input === 'string' ? JSON.parse(preprocessor_map_input) : preprocessor_map_input;
+        const result_map = combine_sourcemaps(filename, [
+            svelte_map,
+            preprocessor_map
+        ]);
+        // Svelte expects a SourceMap which includes toUrl and toString. Instead of wrapping our output in a class,
+        // we just tack on the extra properties.
+        Object.defineProperties(result_map, {
+            toString: {
+                enumerable: false,
+                value: function toString() {
+                    return JSON.stringify(this);
+                }
+            },
+            toUrl: {
+                enumerable: false,
+                value: function toUrl() {
+                    return 'data:application/json;charset=utf-8;base64,' + b64enc(this.toString());
+                }
+            }
+        });
+        return result_map;
+    }
+
+    function check_enable_sourcemap(enable_sourcemap, namespace) {
+        return typeof enable_sourcemap === 'boolean'
+            ? enable_sourcemap
+            : enable_sourcemap[namespace];
+    }
+
+    function dom(component, options) {
+        const { name } = component;
+        const renderer = new Renderer(component, options);
+        const { block } = renderer;
+        block.has_outro_method = true;
+        // prevent fragment being created twice (#1063)
+        if (options.customElement)
+            block.chunks.create.push(b `this.c = @noop;`);
+        const body = [];
+        if (renderer.file_var) {
+            const file = component.file ? x `"${component.file}"` : x `undefined`;
+            body.push(b `const ${renderer.file_var} = ${file};`);
+        }
+        const css = component.stylesheet.render(options.filename, !options.customElement);
+        const css_sourcemap_enabled = check_enable_sourcemap(options.enableSourcemap, 'css');
+        if (css_sourcemap_enabled) {
+            css.map = apply_preprocessor_sourcemap(options.filename, css.map, options.sourcemap);
+        }
+        else {
+            css.map = null;
+        }
+        const styles = css_sourcemap_enabled && component.stylesheet.has_styles && options.dev
+            ? `${css.code}\n/*# sourceMappingURL=${css.map.toUrl()} */`
+            : css.code;
+        const add_css = component.get_unique_name('add_css');
+        const should_add_css = (!options.customElement &&
+            !!styles &&
+            options.css !== false);
+        if (should_add_css) {
+            body.push(b `
+			function ${add_css}(target) {
+				@append_styles(target, "${component.stylesheet.id}", "${styles}");
+			}
+		`);
+        }
+        // fix order
+        // TODO the deconflicted names of blocks are reversed... should set them here
+        const blocks = renderer.blocks.slice().reverse();
+        push_array$1(body, blocks.map(block => {
+            // TODO this is a horrible mess — renderer.blocks
+            // contains a mixture of Blocks and Nodes
+            if (block.render)
+                return block.render();
+            return block;
+        }));
+        if (options.dev && !options.hydratable) {
+            block.chunks.claim.push(b `throw new @_Error("options.hydrate only works if the component was compiled with the \`hydratable: true\` option");`);
+        }
+        const uses_slots = component.var_lookup.has('$$slots');
+        let compute_slots;
+        if (uses_slots) {
+            compute_slots = b `
+			const $$slots = @compute_slots(#slots);
+		`;
+        }
+        const uses_props = component.var_lookup.has('$$props');
+        const uses_rest = component.var_lookup.has('$$restProps');
+        const $$props = uses_props || uses_rest ? '$$new_props' : '$$props';
+        const props = component.vars.filter(variable => !variable.module && variable.export_name);
+        const writable_props = props.filter(variable => variable.writable);
+        const omit_props_names = component.get_unique_name('omit_props_names');
+        const compute_rest = x `@compute_rest_props($$props, ${omit_props_names.name})`;
+        const rest = uses_rest ? b `
+		const ${omit_props_names.name} = [${props.map(prop => `"${prop.export_name}"`).join(',')}];
+		let $$restProps = ${compute_rest};
+	` : null;
+        const set = (uses_props || uses_rest || writable_props.length > 0 || component.slots.size > 0)
+            ? x `
+			${$$props} => {
+				${uses_props && renderer.invalidate('$$props', x `$$props = @assign(@assign({}, $$props), @exclude_internal_props($$new_props))`)}
+				${uses_rest && !uses_props && x `$$props = @assign(@assign({}, $$props), @exclude_internal_props($$new_props))`}
+				${uses_rest && renderer.invalidate('$$restProps', x `$$restProps = ${compute_rest}`)}
+				${writable_props.map(prop => b `if ('${prop.export_name}' in ${$$props}) ${renderer.invalidate(prop.name, x `${prop.name} = ${$$props}.${prop.export_name}`)};`)}
+				${component.slots.size > 0 &&
+            b `if ('$$scope' in ${$$props}) ${renderer.invalidate('$$scope', x `$$scope = ${$$props}.$$scope`)};`}
+			}
+		`
+            : null;
+        const accessors = [];
+        const not_equal = component.component_options.immutable ? x `@not_equal` : x `@safe_not_equal`;
+        let dev_props_check;
+        let inject_state;
+        let capture_state;
+        let props_inject;
+        props.forEach(prop => {
+            const variable = component.var_lookup.get(prop.name);
+            if (!variable.writable || component.component_options.accessors) {
+                accessors.push({
+                    type: 'MethodDefinition',
+                    kind: 'get',
+                    key: { type: 'Identifier', name: prop.export_name },
+                    value: x `function() {
+					return ${prop.hoistable ? prop.name : x `this.$$.ctx[${renderer.context_lookup.get(prop.name).index}]`}
+				}`
+                });
+            }
+            else if (component.compile_options.dev) {
+                accessors.push({
+                    type: 'MethodDefinition',
+                    kind: 'get',
+                    key: { type: 'Identifier', name: prop.export_name },
+                    value: x `function() {
+					throw new @_Error("<${component.tag}>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+				}`
+                });
+            }
+            if (component.component_options.accessors) {
+                if (variable.writable && !renderer.readonly.has(prop.name)) {
+                    accessors.push({
+                        type: 'MethodDefinition',
+                        kind: 'set',
+                        key: { type: 'Identifier', name: prop.export_name },
+                        value: x `function(${prop.name}) {
+						this.$$set({ ${prop.export_name}: ${prop.name} });
+						@flush();
+					}`
+                    });
+                }
+                else if (component.compile_options.dev) {
+                    accessors.push({
+                        type: 'MethodDefinition',
+                        kind: 'set',
+                        key: { type: 'Identifier', name: prop.export_name },
+                        value: x `function(value) {
+						throw new @_Error("<${component.tag}>: Cannot set read-only property '${prop.export_name}'");
+					}`
+                    });
+                }
+            }
+            else if (component.compile_options.dev) {
+                accessors.push({
+                    type: 'MethodDefinition',
+                    kind: 'set',
+                    key: { type: 'Identifier', name: prop.export_name },
+                    value: x `function(value) {
+					throw new @_Error("<${component.tag}>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+				}`
+                });
+            }
+        });
+        component.instance_exports_from.forEach(exports_from => {
+            const import_declaration = Object.assign(Object.assign({}, exports_from), { type: 'ImportDeclaration', specifiers: [], source: exports_from.source });
+            component.imports.push(import_declaration);
+            exports_from.specifiers.forEach(specifier => {
+                if (component.component_options.accessors) {
+                    const name = component.get_unique_name(specifier.exported.name);
+                    import_declaration.specifiers.push(Object.assign(Object.assign({}, specifier), { type: 'ImportSpecifier', imported: specifier.local, local: name }));
+                    accessors.push({
+                        type: 'MethodDefinition',
+                        kind: 'get',
+                        key: { type: 'Identifier', name: specifier.exported.name },
+                        value: x `function() {
+						return ${name}
+					}`
+                    });
+                }
+                else if (component.compile_options.dev) {
+                    accessors.push({
+                        type: 'MethodDefinition',
+                        kind: 'get',
+                        key: { type: 'Identifier', name: specifier.exported.name },
+                        value: x `function() {
+						throw new @_Error("<${component.tag}>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+					}`
+                    });
+                }
+            });
+        });
+        if (component.compile_options.dev) {
+            // checking that expected ones were passed
+            const expected = props.filter(prop => prop.writable && !prop.initialised);
+            if (expected.length) {
+                dev_props_check = b `
+				const { ctx: #ctx } = this.$$;
+				const props = ${options.customElement ? x `this.attributes` : x `options.props || {}`};
+				${expected.map(prop => b `
+				if (${renderer.reference(prop.name)} === undefined && !('${prop.export_name}' in props)) {
+					@_console.warn("<${component.tag}> was created without expected prop '${prop.export_name}'");
+				}`)}
+			`;
+            }
+            const capturable_vars = component.vars.filter(v => !v.internal && !v.global && !v.name.startsWith('$$'));
+            if (capturable_vars.length > 0) {
+                capture_state = x `() => ({ ${capturable_vars.map(prop => p `${prop.name}`)} })`;
+            }
+            const injectable_vars = capturable_vars.filter(v => !v.module && v.writable && v.name[0] !== '$');
+            if (uses_props || injectable_vars.length > 0) {
+                inject_state = x `
+				${$$props} => {
+					${uses_props && renderer.invalidate('$$props', x `$$props = @assign(@assign({}, $$props), $$new_props)`)}
+					${injectable_vars.map(v => b `if ('${v.name}' in $$props) ${renderer.invalidate(v.name, x `${v.name} = ${$$props}.${v.name}`)};`)}
+				}
+			`;
+                props_inject = b `
+				if ($$props && "$$inject" in $$props) {
+					$$self.$inject_state($$props.$$inject);
+				}
+			`;
+            }
+        }
+        // instrument assignments
+        if (component.ast.instance) {
+            let scope = component.instance_scope;
+            const map = component.instance_scope_map;
+            let execution_context = null;
+            walk(component.ast.instance.content, {
+                enter(node) {
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                        if (!execution_context && !scope.block) {
+                            execution_context = node;
+                        }
+                    }
+                    else if (!execution_context && node.type === 'LabeledStatement' && node.label.name === '$') {
+                        execution_context = node;
+                    }
+                },
+                leave(node) {
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                    if (execution_context === node) {
+                        execution_context = null;
+                    }
+                    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+                        const assignee = node.type === 'AssignmentExpression' ? node.left : node.argument;
+                        // normally (`a = 1`, `b.c = 2`), there'll be a single name
+                        // (a or b). In destructuring cases (`[d, e] = [e, d]`) there
+                        // may be more, in which case we need to tack the extra ones
+                        // onto the initial function call
+                        const names = new Set(extract_names(assignee));
+                        this.replace(invalidate(renderer, scope, node, names, execution_context === null));
+                    }
+                }
+            });
+            component.rewrite_props(({ name, reassigned, export_name }) => {
+                const value = `$${name}`;
+                const i = renderer.context_lookup.get(`$${name}`).index;
+                const insert = (reassigned || export_name)
+                    ? b `${`$$subscribe_${name}`}()`
+                    : b `@component_subscribe($$self, ${name}, #value => $$invalidate(${i}, ${value} = #value))`;
+                if (component.compile_options.dev) {
+                    return b `@validate_store(${name}, '${name}'); ${insert}`;
+                }
+                return insert;
+            });
+        }
+        const args = [x `$$self`];
+        const has_invalidate = props.length > 0 ||
+            component.has_reactive_assignments ||
+            component.slots.size > 0 ||
+            capture_state ||
+            inject_state;
+        if (has_invalidate) {
+            args.push(x `$$props`, x `$$invalidate`);
+        }
+        else if (component.compile_options.dev) {
+            // $$props arg is still needed for unknown prop check
+            args.push(x `$$props`);
+        }
+        const has_create_fragment = component.compile_options.dev || block.has_content();
+        if (has_create_fragment) {
+            body.push(b `
+			function create_fragment(#ctx) {
+				${block.get_contents()}
+			}
+		`);
+        }
+        body.push(b `
+		${component.extract_javascript(component.ast.module)}
+
+		${component.fully_hoisted}
+	`);
+        const filtered_props = props.filter(prop => {
+            const variable = component.var_lookup.get(prop.name);
+            if (variable.hoistable)
+                return false;
+            return prop.name[0] !== '$';
+        });
+        const reactive_stores = component.vars.filter(variable => variable.name[0] === '$' && variable.name[1] !== '$');
+        const instance_javascript = component.extract_javascript(component.ast.instance);
+        const has_definition = (component.compile_options.dev ||
+            (instance_javascript && instance_javascript.length > 0) ||
+            filtered_props.length > 0 ||
+            uses_props ||
+            component.partly_hoisted.length > 0 ||
+            renderer.initial_context.length > 0 ||
+            component.reactive_declarations.length > 0 ||
+            capture_state ||
+            inject_state);
+        const definition = has_definition
+            ? component.alias('instance')
+            : { type: 'Literal', value: null };
+        const reactive_store_subscriptions = reactive_stores
+            .filter(store => {
+            const variable = component.var_lookup.get(store.name.slice(1));
+            return !variable || variable.hoistable;
+        })
+            .map(({ name }) => b `
+			${component.compile_options.dev && b `@validate_store(${name.slice(1)}, '${name.slice(1)}');`}
+			@component_subscribe($$self, ${name.slice(1)}, $$value => $$invalidate(${renderer.context_lookup.get(name).index}, ${name} = $$value));
+		`);
+        const resubscribable_reactive_store_unsubscribers = reactive_stores
+            .filter(store => {
+            const variable = component.var_lookup.get(store.name.slice(1));
+            return variable && (variable.reassigned || variable.export_name);
+        })
+            .map(({ name }) => b `$$self.$$.on_destroy.push(() => ${`$$unsubscribe_${name.slice(1)}`}());`);
+        if (has_definition) {
+            const reactive_declarations = [];
+            const fixed_reactive_declarations = []; // not really 'reactive' but whatever
+            component.reactive_declarations.forEach(d => {
+                const dependencies = Array.from(d.dependencies);
+                const uses_rest_or_props = !!dependencies.find(n => n === '$$props' || n === '$$restProps');
+                const writable = dependencies.filter(n => {
+                    const variable = component.var_lookup.get(n);
+                    return variable && (variable.export_name || variable.mutated || variable.reassigned);
+                });
+                const condition = !uses_rest_or_props && writable.length > 0 && renderer.dirty(writable, true);
+                let statement = d.node; // TODO remove label (use d.node.body) if it's not referenced
+                if (condition)
+                    statement = b `if (${condition}) { ${statement} }`[0];
+                if (condition || uses_rest_or_props) {
+                    reactive_declarations.push(statement);
+                }
+                else {
+                    fixed_reactive_declarations.push(statement);
+                }
+            });
+            const injected = Array.from(component.injected_reactive_declaration_vars).filter(name => {
+                const variable = component.var_lookup.get(name);
+                return variable.injected && variable.name[0] !== '$';
+            });
+            const reactive_store_declarations = reactive_stores.map(variable => {
+                const $name = variable.name;
+                const name = $name.slice(1);
+                const store = component.var_lookup.get(name);
+                if (store && (store.reassigned || store.export_name)) {
+                    const unsubscribe = `$$unsubscribe_${name}`;
+                    const subscribe = `$$subscribe_${name}`;
+                    const i = renderer.context_lookup.get($name).index;
+                    return b `let ${$name}, ${unsubscribe} = @noop, ${subscribe} = () => (${unsubscribe}(), ${unsubscribe} = @subscribe(${name}, $$value => $$invalidate(${i}, ${$name} = $$value)), ${name})`;
+                }
+                return b `let ${$name};`;
+            });
+            let unknown_props_check;
+            if (component.compile_options.dev && !(uses_props || uses_rest)) {
+                unknown_props_check = b `
+				const writable_props = [${writable_props.map(prop => x `'${prop.export_name}'`)}];
+				@_Object.keys($$props).forEach(key => {
+					if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') @_console.warn(\`<${component.tag}> was created with unknown prop '\${key}'\`);
+				});
+			`;
+            }
+            const return_value = {
+                type: 'ArrayExpression',
+                elements: renderer.initial_context.map(member => ({
+                    type: 'Identifier',
+                    name: member.name
+                }))
+            };
+            body.push(b `
+			function ${definition}(${args}) {
+				${injected.map(name => b `let ${name};`)}
+
+				${rest}
+
+				${reactive_store_declarations}
+
+				${reactive_store_subscriptions}
+
+				${resubscribable_reactive_store_unsubscribers}
+
+				${component.slots.size || component.compile_options.dev || uses_slots ? b `let { $$slots: #slots = {}, $$scope } = $$props;` : null}
+				${component.compile_options.dev && b `@validate_slots('${component.tag}', #slots, [${[...component.slots.keys()].map(key => `'${key}'`).join(',')}]);`}
+				${compute_slots}
+
+				${instance_javascript}
+
+				${unknown_props_check}
+
+				${renderer.binding_groups.size > 0 && b `const $$binding_groups = [${[...renderer.binding_groups.keys()].map(_ => x `[]`)}];`}
+
+				${component.partly_hoisted}
+
+				${set && b `$$self.$$set = ${set};`}
+
+				${capture_state && b `$$self.$capture_state = ${capture_state};`}
+
+				${inject_state && b `$$self.$inject_state = ${inject_state};`}
+
+				${ /* before reactive declarations */props_inject}
+
+				${reactive_declarations.length > 0 && b `
+				$$self.$$.update = () => {
+					${reactive_declarations}
+				};
+				`}
+
+				${fixed_reactive_declarations}
+
+				${uses_props && b `$$props = @exclude_internal_props($$props);`}
+
+				return ${return_value};
+			}
+		`);
+        }
+        const prop_indexes = x `{
+		${props.filter(v => v.export_name && !v.module).map(v => p `${v.export_name}: ${renderer.context_lookup.get(v.name).index}`)}
+	}`;
+        let dirty;
+        if (renderer.context_overflow) {
+            dirty = x `[]`;
+            for (let i = 0; i < renderer.context.length; i += 31) {
+                dirty.elements.push(x `-1`);
+            }
+        }
+        if (options.customElement) {
+            let init_props = x `@attribute_to_object(this.attributes)`;
+            if (uses_slots) {
+                init_props = x `{ ...${init_props}, $$slots: @get_custom_elements_slots(this) }`;
+            }
+            const declaration = b `
+			class ${name} extends @SvelteElement {
+				constructor(options) {
+					super();
+
+					${css.code && b `this.shadowRoot.innerHTML = \`<style>${css.code.replace(/\\/g, '\\\\')}${css_sourcemap_enabled && options.dev ? `\n/*# sourceMappingURL=${css.map.toUrl()} */` : ''}</style>\`;`}
+
+					@init(this, { target: this.shadowRoot, props: ${init_props}, customElement: true }, ${definition}, ${has_create_fragment ? 'create_fragment' : 'null'}, ${not_equal}, ${prop_indexes}, null, ${dirty});
+
+					${dev_props_check}
+
+					if (options) {
+						if (options.target) {
+							@insert(options.target, this, options.anchor);
+						}
+
+						${(props.length > 0 || uses_props || uses_rest) && b `
+						if (options.props) {
+							this.$set(options.props);
+							@flush();
+						}`}
+					}
+				}
+			}
+		`[0];
+            if (props.length > 0) {
+                declaration.body.body.push({
+                    type: 'MethodDefinition',
+                    kind: 'get',
+                    static: true,
+                    computed: false,
+                    key: { type: 'Identifier', name: 'observedAttributes' },
+                    value: x `function() {
+					return [${props.map(prop => x `"${prop.export_name}"`)}];
+				}`
+                });
+            }
+            push_array$1(declaration.body.body, accessors);
+            body.push(declaration);
+            if (component.tag != null) {
+                body.push(b `
+				@_customElements.define("${component.tag}", ${name});
+			`);
+            }
+        }
+        else {
+            const superclass = {
+                type: 'Identifier',
+                name: options.dev ? '@SvelteComponentDev' : '@SvelteComponent'
+            };
+            const optional_parameters = [];
+            if (should_add_css) {
+                optional_parameters.push(add_css);
+            }
+            else if (dirty) {
+                optional_parameters.push(x `null`);
+            }
+            if (dirty) {
+                optional_parameters.push(dirty);
+            }
+            const declaration = b `
+			class ${name} extends ${superclass} {
+				constructor(options) {
+					super(${options.dev && 'options'});
+					@init(this, options, ${definition}, ${has_create_fragment ? 'create_fragment' : 'null'}, ${not_equal}, ${prop_indexes}, ${optional_parameters});
+					${options.dev && b `@dispatch_dev("SvelteRegisterComponent", { component: this, tagName: "${name.name}", options, id: create_fragment.name });`}
+
+					${dev_props_check}
+				}
+			}
+		`[0];
+            push_array$1(declaration.body.body, accessors);
+            body.push(declaration);
+        }
+        return { js: flatten(body), css };
+    }
+
+    function get_const_tags$1(const_tags) {
+        if (const_tags.length === 0)
+            return null;
+        return {
+            type: 'VariableDeclaration',
+            kind: 'let',
+            declarations: const_tags.map(const_tag => {
+                const assignment = const_tag.node.expression;
+                return {
+                    type: 'VariableDeclarator',
+                    id: assignment.left,
+                    init: assignment.right
+                };
+            })
+        };
+    }
+
+    function AwaitBlock$1 (node, renderer, options) {
+        renderer.push();
+        renderer.render(node.pending.children, options);
+        const pending = renderer.pop();
+        renderer.push();
+        renderer.render(node.then.children, options);
+        const then = renderer.pop();
+        renderer.add_expression(x `
+		function(__value) {
+			if (@is_promise(__value)) {
+				__value.then(null, @noop);
+				return ${pending};
+			}
+			return (function(${node.then_node ? node.then_node : ''}) { ${get_const_tags$1(node.then.const_tags)}; return ${then}; }(__value));
+		}(${node.expression.node})
+	`);
+    }
+
+    function Comment$2 (node, renderer, options) {
+        if (options.preserveComments) {
+            renderer.add_string(`<!--${node.data}-->`);
+        }
+    }
+
+    function DebugTag$1 (node, renderer, options) {
+        if (!options.dev)
+            return;
+        const filename = options.filename || null;
+        const { line, column } = options.locate(node.start + 1);
+        const obj = x `{
+		${node.expressions.map(e => p `${e.node.name}`)}
+	}`;
+        renderer.add_expression(x `@debug(${filename ? x `"${filename}"` : x `null`}, ${line - 1}, ${column}, ${obj})`);
+    }
+
+    function EachBlock$1 (node, renderer, options) {
+        const args = [node.context_node];
+        if (node.index)
+            args.push({ type: 'Identifier', name: node.index });
+        renderer.push();
+        renderer.render(node.children, options);
+        const result = renderer.pop();
+        const consequent = x `@each(${node.expression.node}, (${args}) => { ${get_const_tags$1(node.const_tags)}; return ${result} })`;
+        if (node.else) {
+            renderer.push();
+            renderer.render(node.else.children, options);
+            let alternate = renderer.pop();
+            if (node.else.const_tags.length > 0)
+                alternate = x `(() => { ${get_const_tags$1(node.else.const_tags)}; return ${alternate} })()`;
+            renderer.add_expression(x `${node.expression.node}.length ? ${consequent} : ${alternate}`);
+        }
+        else {
+            renderer.add_expression(consequent);
+        }
+    }
+
+    function get_class_attribute_value(attribute) {
+        // handle special case — `class={possiblyUndefined}` with scoped CSS
+        if (attribute.chunks.length === 2 && attribute.chunks[1].synthetic) {
+            const value = attribute.chunks[0].node;
+            return x `@escape(@null_to_empty(${value})) + "${attribute.chunks[1].data}"`;
+        }
+        return get_attribute_value(attribute);
+    }
+    function get_attribute_value(attribute) {
+        if (attribute.chunks.length === 0)
+            return x `""`;
+        return attribute.chunks
+            .map((chunk) => {
+            return chunk.type === 'Text'
+                ? string_literal(chunk.data.replace(/"/g, '&quot;'))
+                : x `@escape(${chunk.node})`;
+        })
+            .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+    }
+    function get_attribute_expression(attribute) {
+        if (attribute.chunks.length === 1 && attribute.chunks[0].type === 'Expression') {
+            return attribute.chunks[0].node;
+        }
+        return get_attribute_value(attribute);
+    }
+
+    // source: https://html.spec.whatwg.org/multipage/indices.html
+    const boolean_attributes = new Set([
+        'allowfullscreen',
+        'allowpaymentrequest',
+        'async',
+        'autofocus',
+        'autoplay',
+        'checked',
+        'controls',
+        'default',
+        'defer',
+        'disabled',
+        'formnovalidate',
+        'hidden',
+        'ismap',
+        'loop',
+        'multiple',
+        'muted',
+        'nomodule',
+        'novalidate',
+        'open',
+        'playsinline',
+        'readonly',
+        'required',
+        'reversed',
+        'selected'
+    ]);
+
+    // similar logic from `compile/render_dom/wrappers/Fragment`
+    // We want to remove trailing whitespace inside an element/component/block,
+    // *unless* there is no whitespace between this node and its next sibling
+    function remove_whitespace_children(children, next) {
+        const nodes = [];
+        let last_child;
+        let i = children.length;
+        while (i--) {
+            const child = children[i];
+            if (child.type === 'Text') {
+                if (child.should_skip()) {
+                    continue;
+                }
+                let { data } = child;
+                if (nodes.length === 0) {
+                    const should_trim = next
+                        ? next.type === 'Text' &&
+                            /^\s/.test(next.data) &&
+                            trimmable_at$1(child, next)
+                        : !child.has_ancestor('EachBlock');
+                    if (should_trim && !child.keep_space()) {
+                        data = trim_end(data);
+                        if (!data)
+                            continue;
+                    }
+                }
+                // glue text nodes (which could e.g. be separated by comments) together
+                if (last_child && last_child.type === 'Text') {
+                    last_child.data = data + last_child.data;
+                    continue;
+                }
+                nodes.unshift(child);
+                link(last_child, last_child = child);
+            }
+            else {
+                nodes.unshift(child);
+                link(last_child, last_child = child);
+            }
+        }
+        const first = nodes[0];
+        if (first && first.type === 'Text' && !first.keep_space()) {
+            first.data = trim_start(first.data);
+            if (!first.data) {
+                first.var = null;
+                nodes.shift();
+                if (nodes[0]) {
+                    nodes[0].prev = null;
+                }
+            }
+        }
+        return nodes;
+    }
+    function trimmable_at$1(child, next_sibling) {
+        // Whitespace is trimmable if one of the following is true:
+        // The child and its sibling share a common nearest each block (not at an each block boundary)
+        // The next sibling's previous node is an each block
+        return (next_sibling.find_nearest(/EachBlock/) ===
+            child.find_nearest(/EachBlock/) || next_sibling.prev.type === 'EachBlock');
+    }
+
+    function Element$1 (node, renderer, options) {
+        const children = remove_whitespace_children(node.children, node.next);
+        // awkward special case
+        let node_contents;
+        const contenteditable = (node.name !== 'textarea' &&
+            node.name !== 'input' &&
+            node.attributes.some((attribute) => attribute.name === 'contenteditable'));
+        if (node.is_dynamic_element) {
+            renderer.push();
+        }
+        renderer.add_string('<');
+        add_tag_name();
+        const class_expression_list = node.classes.map(class_directive => {
+            const { expression, name } = class_directive;
+            const snippet = expression ? expression.node : x `#ctx.${name}`; // TODO is this right?
+            return x `${snippet} ? "${name}" : ""`;
+        });
+        if (node.needs_manual_style_scoping) {
+            class_expression_list.push(x `"${node.component.stylesheet.id}"`);
+        }
+        const class_expression = class_expression_list.length > 0 &&
+            class_expression_list.reduce((lhs, rhs) => x `${lhs} + ' ' + ${rhs}`);
+        const style_expression_list = node.styles.map(style_directive => {
+            const { name, expression: { node: expression } } = style_directive;
+            return p `"${name}": ${expression}`;
+        });
+        const style_expression = style_expression_list.length > 0 &&
+            x `{ ${style_expression_list} }`;
+        if (node.attributes.some(attr => attr.is_spread)) {
+            // TODO dry this out
+            const args = [];
+            node.attributes.forEach(attribute => {
+                if (attribute.is_spread) {
+                    args.push(x `@escape_object(${attribute.expression.node})`);
+                }
+                else {
+                    const attr_name = node.namespace === namespaces.foreign ? attribute.name : fix_attribute_casing(attribute.name);
+                    const name = attribute.name.toLowerCase();
+                    if (name === 'value' && node.name.toLowerCase() === 'textarea') {
+                        node_contents = get_attribute_value(attribute);
+                    }
+                    else if (attribute.is_true) {
+                        args.push(x `{ ${attr_name}: true }`);
+                    }
+                    else if (boolean_attributes.has(name) &&
+                        attribute.chunks.length === 1 &&
+                        attribute.chunks[0].type !== 'Text') {
+                        // a boolean attribute with one non-Text chunk
+                        args.push(x `{ ${attr_name}: ${attribute.chunks[0].node} || null }`);
+                    }
+                    else if (attribute.chunks.length === 1 && attribute.chunks[0].type !== 'Text') {
+                        const snippet = attribute.chunks[0].node;
+                        args.push(x `{ ${attr_name}: @escape_attribute_value(${snippet}) }`);
+                    }
+                    else {
+                        args.push(x `{ ${attr_name}: ${get_attribute_value(attribute)} }`);
+                    }
+                }
+            });
+            renderer.add_expression(x `@spread([${args}], { classes: ${class_expression}, styles: ${style_expression} })`);
+        }
+        else {
+            let add_class_attribute = !!class_expression;
+            let add_style_attribute = !!style_expression;
+            node.attributes.forEach(attribute => {
+                const name = attribute.name.toLowerCase();
+                const attr_name = node.namespace === namespaces.foreign ? attribute.name : fix_attribute_casing(attribute.name);
+                if (name === 'value' && node.name.toLowerCase() === 'textarea') {
+                    node_contents = get_attribute_value(attribute);
+                }
+                else if (attribute.is_true) {
+                    renderer.add_string(` ${attr_name}`);
+                }
+                else if (boolean_attributes.has(name) &&
+                    attribute.chunks.length === 1 &&
+                    attribute.chunks[0].type !== 'Text') {
+                    // a boolean attribute with one non-Text chunk
+                    renderer.add_string(' ');
+                    renderer.add_expression(x `${attribute.chunks[0].node} ? "${attr_name}" : ""`);
+                }
+                else if (name === 'class' && class_expression) {
+                    add_class_attribute = false;
+                    renderer.add_string(` ${attr_name}="`);
+                    renderer.add_expression(x `[${get_class_attribute_value(attribute)}, ${class_expression}].join(' ').trim()`);
+                    renderer.add_string('"');
+                }
+                else if (name === 'style' && style_expression) {
+                    add_style_attribute = false;
+                    renderer.add_expression(x `@add_styles(@merge_ssr_styles(${get_attribute_value(attribute)}, ${style_expression}))`);
+                }
+                else if (attribute.chunks.length === 1 && attribute.chunks[0].type !== 'Text') {
+                    const snippet = attribute.chunks[0].node;
+                    renderer.add_expression(x `@add_attribute("${attr_name}", ${snippet}, ${boolean_attributes.has(name) ? 1 : 0})`);
+                }
+                else {
+                    renderer.add_string(` ${attr_name}="`);
+                    renderer.add_expression((name === 'class' ? get_class_attribute_value : get_attribute_value)(attribute));
+                    renderer.add_string('"');
+                }
+            });
+            if (add_class_attribute) {
+                renderer.add_expression(x `@add_classes((${class_expression}).trim())`);
+            }
+            if (add_style_attribute) {
+                renderer.add_expression(x `@add_styles(${style_expression})`);
+            }
+        }
+        node.bindings.forEach(binding => {
+            const { name, expression } = binding;
+            if (binding.is_readonly) {
+                return;
+            }
+            if (name === 'group') {
+                const value_attribute = node.attributes.find(({ name }) => name === 'value');
+                if (value_attribute) {
+                    const value = get_attribute_expression(value_attribute);
+                    const type = node.get_static_attribute_value('type');
+                    const bound = expression.node;
+                    const condition = type === 'checkbox' ? x `~${bound}.indexOf(${value})` : x `${value} === ${bound}`;
+                    renderer.add_expression(x `${condition} ? @add_attribute("checked", true, 1) : ""`);
+                }
+            }
+            else if (contenteditable && (name === 'textContent' || name === 'innerHTML')) {
+                node_contents = expression.node;
+                // TODO where was this used?
+                // value = name === 'textContent' ? x`@escape($$value)` : x`$$value`;
+            }
+            else if (binding.name === 'value' && node.name === 'textarea') {
+                const snippet = expression.node;
+                node_contents = x `${snippet} || ""`;
+            }
+            else if (binding.name === 'value' && node.name === 'select') ;
+            else {
+                const snippet = expression.node;
+                renderer.add_expression(x `@add_attribute("${name}", ${snippet}, ${boolean_attributes.has(name) ? 1 : 0})`);
+            }
+        });
+        if (options.hydratable && options.head_id) {
+            renderer.add_string(` data-svelte="${options.head_id}"`);
+        }
+        renderer.add_string('>');
+        if (node_contents !== undefined) {
+            if (contenteditable) {
+                renderer.push();
+                renderer.render(children, options);
+                const result = renderer.pop();
+                renderer.add_expression(x `($$value => $$value === void 0 ? ${result} : $$value)(${node_contents})`);
+            }
+            else {
+                if (node.name === 'textarea') {
+                    // Two or more leading newlines are required to restore the leading newline immediately after `<textarea>`.
+                    // see https://html.spec.whatwg.org/multipage/syntax.html#element-restrictions
+                    const value_attribute = node.attributes.find(({ name }) => name === 'value');
+                    if (value_attribute) {
+                        const first = value_attribute.chunks[0];
+                        if (first && first.type === 'Text' && start_newline.test(first.data)) {
+                            renderer.add_string('\n');
+                        }
+                    }
+                }
+                renderer.add_expression(node_contents);
+            }
+            add_close_tag();
+        }
+        else {
+            if (node.name === 'pre') {
+                // Two or more leading newlines are required to restore the leading newline immediately after `<pre>`.
+                // see https://html.spec.whatwg.org/multipage/grouping-content.html#the-pre-element
+                // see https://html.spec.whatwg.org/multipage/syntax.html#element-restrictions
+                const first = children[0];
+                if (first && first.type === 'Text' && start_newline.test(first.data)) {
+                    renderer.add_string('\n');
+                }
+            }
+            if (node.is_dynamic_element)
+                renderer.push();
+            renderer.render(children, options);
+            if (node.is_dynamic_element) {
+                const children = renderer.pop();
+                renderer.add_expression(x `@is_void(#tag) ? '' : ${children}`);
+            }
+            add_close_tag();
+        }
+        if (node.is_dynamic_element) {
+            let content = renderer.pop();
+            if (options.dev && node.children.length > 0)
+                content = x `(() => { @validate_void_dynamic_element(#tag); return ${content}; })()`;
+            renderer.add_expression(x `((#tag) => {
+			${options.dev && x `@validate_dynamic_element(#tag)`}
+			return #tag ? ${content} : '';
+		})(${node.tag_expr.node})`);
+        }
+        function add_close_tag() {
+            if (node.tag_expr.node.type === 'Literal') {
+                if (!is_void(node.tag_expr.node.value)) {
+                    renderer.add_string('</');
+                    add_tag_name();
+                    renderer.add_string('>');
+                }
+                return;
+            }
+            renderer.add_expression(x `@is_void(#tag) ? '' : \`</\${#tag}>\``);
+        }
+        function add_tag_name() {
+            if (node.tag_expr.node.type === 'Literal') {
+                renderer.add_string(node.tag_expr.node.value);
+            }
+            else {
+                renderer.add_expression(node.tag_expr.node);
+            }
+        }
+    }
+
+    function Head$1 (node, renderer, options) {
+        const head_options = Object.assign(Object.assign({}, options), { head_id: node.id });
+        renderer.push();
+        renderer.render(node.children, head_options);
+        const result = renderer.pop();
+        renderer.add_expression(x `$$result.head += ${result}, ""`);
+    }
+
+    function HtmlTag (node, renderer, options) {
+        if (options.hydratable)
+            renderer.add_string('<!-- HTML_TAG_START -->');
+        renderer.add_expression(node.expression.node);
+        if (options.hydratable)
+            renderer.add_string('<!-- HTML_TAG_END -->');
+    }
+
+    function IfBlock$1 (node, renderer, options) {
+        const condition = node.expression.node;
+        renderer.push();
+        renderer.render(node.children, options);
+        let consequent = renderer.pop();
+        if (node.const_tags.length > 0)
+            consequent = x `(() => { ${get_const_tags$1(node.const_tags)}; return ${consequent} })()`;
+        renderer.push();
+        if (node.else)
+            renderer.render(node.else.children, options);
+        let alternate = renderer.pop();
+        if (node.else && node.else.const_tags.length > 0)
+            alternate = x `(() => { ${get_const_tags$1(node.else.const_tags)}; return ${alternate} })()`;
+        renderer.add_expression(x `${condition} ? ${consequent} : ${alternate}`);
+    }
+
+    function get_prop_value(attribute) {
+        if (attribute.is_true)
+            return x `true`;
+        if (attribute.chunks.length === 0)
+            return x `''`;
+        return attribute.chunks
+            .map(chunk => {
+            if (chunk.type === 'Text')
+                return string_literal(chunk.data);
+            return chunk.node;
+        })
+            .reduce((lhs, rhs) => x `${lhs} + ${rhs}`);
+    }
+    function InlineComponent$1 (node, renderer, options) {
+        const binding_props = [];
+        const binding_fns = [];
+        node.bindings.forEach(binding => {
+            renderer.has_bindings = true;
+            // TODO this probably won't work for contextual bindings
+            const snippet = binding.expression.node;
+            binding_props.push(p `${binding.name}: ${snippet}`);
+            binding_fns.push(p `${binding.name}: $$value => { ${snippet} = $$value; $$settled = false }`);
+        });
+        const uses_spread = node.attributes.find(attr => attr.is_spread);
+        let props;
+        if (uses_spread) {
+            props = x `@_Object.assign(${node.attributes
+            .map(attribute => {
+            if (attribute.is_spread) {
+                return attribute.expression.node;
+            }
+            else {
+                return x `{ ${attribute.name}: ${get_prop_value(attribute)} }`;
+            }
+        })
+            .concat(binding_props.map(p => x `{ ${p} }`))})`;
+        }
+        else {
+            props = x `{
+			${node.attributes.map(attribute => p `${attribute.name}: ${get_prop_value(attribute)}`)},
+			${binding_props}
+		}`;
+        }
+        const bindings = x `{
+		${binding_fns}
+	}`;
+        const expression = (node.name === 'svelte:self'
+            ? renderer.name
+            : node.name === 'svelte:component'
+                ? x `(${node.expression.node}) || @missing_component`
+                : node.name.split('.').reduce(((lhs, rhs) => x `${lhs}.${rhs}`)));
+        const slot_fns = [];
+        const children = node.children;
+        if (children.length) {
+            const slot_scopes = new Map();
+            renderer.render(children, Object.assign({}, options, {
+                slot_scopes
+            }));
+            slot_scopes.forEach(({ input, output, statements }, name) => {
+                slot_fns.push(p `${name}: (${input}) => { ${statements}; return ${output}; }`);
+            });
+        }
+        const slots = x `{
+		${slot_fns}
+	}`;
+        if (node.css_custom_properties.length > 0) {
+            renderer.add_string('<div style="display: contents;');
+            node.css_custom_properties.forEach(attr => {
+                renderer.add_string(` ${attr.name}:`);
+                renderer.add_expression(get_attribute_value(attr));
+                renderer.add_string(';');
+            });
+            renderer.add_string('">');
+        }
+        renderer.add_expression(x `@validate_component(${expression}, "${node.name}").$$render($$result, ${props}, ${bindings}, ${slots})`);
+        if (node.css_custom_properties.length > 0) {
+            renderer.add_string('</div>');
+        }
+    }
+
+    function KeyBlock$1 (node, renderer, options) {
+        renderer.render(node.children, options);
+    }
+
+    function get_slot_scope(lets) {
+        if (lets.length === 0)
+            return null;
+        return {
+            type: 'ObjectPattern',
+            properties: lets.map(l => {
+                return {
+                    type: 'Property',
+                    kind: 'init',
+                    method: false,
+                    shorthand: false,
+                    computed: false,
+                    key: l.name,
+                    value: l.value || l.name
+                };
+            })
+        };
+    }
+
+    function Slot$1 (node, renderer, options) {
+        const slot_data = get_slot_data(node.values);
+        const slot = node.get_static_attribute_value('slot');
+        const nearest_inline_component = node.find_nearest(/InlineComponent/);
+        if (slot && nearest_inline_component) {
+            renderer.push();
+        }
+        renderer.push();
+        renderer.render(node.children, options);
+        const result = renderer.pop();
+        renderer.add_expression(x `
+		#slots.${node.slot_name}
+			? #slots.${node.slot_name}(${slot_data})
+			: ${result}
+	`);
+        if (slot && nearest_inline_component) {
+            const lets = node.lets;
+            const seen = new Set(lets.map(l => l.name.name));
+            nearest_inline_component.lets.forEach(l => {
+                if (!seen.has(l.name.name))
+                    lets.push(l);
+            });
+            options.slot_scopes.set(slot, {
+                input: get_slot_scope(node.lets),
+                output: renderer.pop()
+            });
+        }
+    }
+
+    function SlotTemplate$1 (node, renderer, options) {
+        const parent_inline_component = node.parent;
+        const children = remove_whitespace_children(node instanceof SlotTemplate ? node.children : [node], node.next);
+        renderer.push();
+        renderer.render(children, options);
+        const lets = node.lets;
+        const seen = new Set(lets.map(l => l.name.name));
+        parent_inline_component.lets.forEach(l => {
+            if (!seen.has(l.name.name))
+                lets.push(l);
+        });
+        const slot_fragment_content = renderer.pop();
+        if (!is_empty_template_literal(slot_fragment_content)) {
+            if (options.slot_scopes.has(node.slot_template_name)) {
+                if (node.slot_template_name === 'default') {
+                    throw new Error('Found elements without slot attribute when using slot="default"');
+                }
+                throw new Error(`Duplicate slot name "${node.slot_template_name}" in <${parent_inline_component.name}>`);
+            }
+            options.slot_scopes.set(node.slot_template_name, {
+                input: get_slot_scope(node.lets),
+                output: slot_fragment_content,
+                statements: get_const_tags$1(node.const_tags)
+            });
+        }
+    }
+    function is_empty_template_literal(template_literal) {
+        return (template_literal.expressions.length === 0 &&
+            template_literal.quasis.length === 1 &&
+            template_literal.quasis[0].value.raw === '');
+    }
+
+    function Tag$2 (node, renderer, _options) {
+        const snippet = node.expression.node;
+        renderer.add_expression(node.parent &&
+            node.parent.type === 'Element' &&
+            node.parent.name === 'style'
+            ? snippet
+            : x `@escape(${snippet})`);
+    }
+
+    function Text$1 (node, renderer, _options) {
+        let text = node.data;
+        if (!node.parent ||
+            node.parent.type !== 'Element' ||
+            (node.parent.name !== 'script' && node.parent.name !== 'style')) {
+            // unless this Text node is inside a <script> or <style> element, escape &,<,>
+            text = escape_html(text);
+        }
+        renderer.add_string(text);
+    }
+
+    function Title$1 (node, renderer, options) {
+        renderer.push();
+        renderer.add_string('<title>');
+        renderer.render(node.children, options);
+        renderer.add_string('</title>');
+        const result = renderer.pop();
+        renderer.add_expression(x `$$result.title = ${result}, ""`);
+    }
+
+    function noop$1() { }
+    const handlers$1 = {
+        AwaitBlock: AwaitBlock$1,
+        Body: noop$1,
+        Comment: Comment$2,
+        DebugTag: DebugTag$1,
+        EachBlock: EachBlock$1,
+        Element: Element$1,
+        Head: Head$1,
+        IfBlock: IfBlock$1,
+        InlineComponent: InlineComponent$1,
+        KeyBlock: KeyBlock$1,
+        MustacheTag: Tag$2,
+        Options: noop$1,
+        RawMustacheTag: HtmlTag,
+        Slot: Slot$1,
+        SlotTemplate: SlotTemplate$1,
+        Text: Text$1,
+        Title: Title$1,
+        Window: noop$1
+    };
+    class Renderer$1 {
+        constructor({ name }) {
+            this.has_bindings = false;
+            this.stack = [];
+            this.targets = [];
+            this.name = name;
+            this.push();
+        }
+        add_string(str) {
+            this.current.value += escape_template(str);
+        }
+        add_expression(node) {
+            this.literal.quasis.push({
+                type: 'TemplateElement',
+                value: { raw: this.current.value, cooked: null },
+                tail: false
+            });
+            this.literal.expressions.push(node);
+            this.current.value = '';
+        }
+        push() {
+            const current = this.current = { value: '' };
+            const literal = this.literal = {
+                type: 'TemplateLiteral',
+                expressions: [],
+                quasis: []
+            };
+            this.stack.push({ current, literal });
+        }
+        pop() {
+            this.literal.quasis.push({
+                type: 'TemplateElement',
+                value: { raw: this.current.value, cooked: null },
+                tail: true
+            });
+            const popped = this.stack.pop();
+            const last = this.stack[this.stack.length - 1];
+            if (last) {
+                this.literal = last.literal;
+                this.current = last.current;
+            }
+            return popped.literal;
+        }
+        render(nodes, options) {
+            nodes.forEach(node => {
+                const handler = handlers$1[node.type];
+                if (!handler) {
+                    throw new Error(`No handler for '${node.type}' nodes`);
+                }
+                handler(node, this, options);
+            });
+        }
+    }
+
+    function ssr(component, options) {
+        const renderer = new Renderer$1({
+            name: component.name
+        });
+        const { name } = component;
+        // create $$render function
+        renderer.render(trim(component.fragment.children), Object.assign({
+            locate: component.locate
+        }, options));
+        // TODO put this inside the Renderer class
+        const literal = renderer.pop();
+        // TODO concatenate CSS maps
+        const css = options.customElement ?
+            { code: null, map: null } :
+            component.stylesheet.render(options.filename, true);
+        const uses_rest = component.var_lookup.has('$$restProps');
+        const props = component.vars.filter(variable => !variable.module && variable.export_name);
+        const rest = uses_rest ? b `let $$restProps = @compute_rest_props($$props, [${props.map(prop => `"${prop.export_name}"`).join(',')}]);` : null;
+        const uses_slots = component.var_lookup.has('$$slots');
+        const slots = uses_slots ? b `let $$slots = @compute_slots(#slots);` : null;
+        const reactive_stores = component.vars.filter(variable => variable.name[0] === '$' && variable.name[1] !== '$');
+        const reactive_store_subscriptions = reactive_stores
+            .filter(store => {
+            const variable = component.var_lookup.get(store.name.slice(1));
+            return !variable || variable.hoistable;
+        })
+            .map(({ name }) => {
+            const store_name = name.slice(1);
+            return b `
+				${component.compile_options.dev && b `@validate_store(${store_name}, '${store_name}');`}
+				${`$$unsubscribe_${store_name}`} = @subscribe(${store_name}, #value => ${name} = #value)
+			`;
+        });
+        const reactive_store_unsubscriptions = reactive_stores.map(({ name }) => b `${`$$unsubscribe_${name.slice(1)}`}()`);
+        const reactive_store_declarations = reactive_stores
+            .map(({ name }) => {
+            const store_name = name.slice(1);
+            const store = component.var_lookup.get(store_name);
+            if (store && store.reassigned) {
+                const unsubscribe = `$$unsubscribe_${store_name}`;
+                const subscribe = `$$subscribe_${store_name}`;
+                return b `let ${name}, ${unsubscribe} = @noop, ${subscribe} = () => (${unsubscribe}(), ${unsubscribe} = @subscribe(${store_name}, $$value => ${name} = $$value), ${store_name})`;
+            }
+            return b `let ${name}, ${`$$unsubscribe_${store_name}`};`;
+        });
+        // instrument get/set store value
+        if (component.ast.instance) {
+            let scope = component.instance_scope;
+            const map = component.instance_scope_map;
+            walk(component.ast.instance.content, {
+                enter(node) {
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                },
+                leave(node) {
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+                        const assignee = node.type === 'AssignmentExpression' ? node.left : node.argument;
+                        const names = new Set(extract_names(assignee));
+                        const to_invalidate = new Set();
+                        for (const name of names) {
+                            const variable = component.var_lookup.get(name);
+                            if (variable &&
+                                !variable.hoistable &&
+                                !variable.global &&
+                                !variable.module &&
+                                (variable.subscribable || variable.name[0] === '$')) {
+                                to_invalidate.add(variable.name);
+                            }
+                        }
+                        if (to_invalidate.size) {
+                            this.replace(invalidate({ component }, scope, node, to_invalidate, true));
+                        }
+                    }
+                }
+            });
+        }
+        component.rewrite_props(({ name, reassigned }) => {
+            const value = `$${name}`;
+            let insert = reassigned
+                ? b `${`$$subscribe_${name}`}()`
+                : b `${`$$unsubscribe_${name}`} = @subscribe(${name}, #value => $${value} = #value)`;
+            if (component.compile_options.dev) {
+                insert = b `@validate_store(${name}, '${name}'); ${insert}`;
+            }
+            return insert;
+        });
+        const instance_javascript = component.extract_javascript(component.ast.instance);
+        // TODO only do this for props with a default value
+        const parent_bindings = instance_javascript
+            ? component.vars
+                .filter(variable => !variable.module && variable.export_name)
+                .map(prop => {
+                return b `if ($$props.${prop.export_name} === void 0 && $$bindings.${prop.export_name} && ${prop.name} !== void 0) $$bindings.${prop.export_name}(${prop.name});`;
+            })
+            : [];
+        const injected = Array.from(component.injected_reactive_declaration_vars).filter(name => {
+            const variable = component.var_lookup.get(name);
+            return variable.injected;
+        });
+        const reactive_declarations = component.reactive_declarations.map(d => {
+            const body = d.node.body;
+            let statement = b `${body}`;
+            if (!d.declaration) { // TODO do not add label if it's not referenced
+                statement = b `$: { ${statement} }`;
+            }
+            return statement;
+        });
+        const main = renderer.has_bindings
+            ? b `
+			let $$settled;
+			let $$rendered;
+
+			do {
+				$$settled = true;
+
+				${reactive_declarations}
+
+				$$rendered = ${literal};
+			} while (!$$settled);
+
+			${reactive_store_unsubscriptions}
+
+			return $$rendered;
+		`
+            : b `
+			${reactive_declarations}
+
+			${reactive_store_unsubscriptions}
+
+			return ${literal};`;
+        const blocks = [
+            ...injected.map(name => b `let ${name};`),
+            rest,
+            slots,
+            ...reactive_store_declarations,
+            ...reactive_store_subscriptions,
+            instance_javascript,
+            ...parent_bindings,
+            css.code && b `$$result.css.add(#css);`,
+            main
+        ].filter(Boolean);
+        const css_sourcemap_enabled = check_enable_sourcemap(options.enableSourcemap, 'css');
+        const js = b `
+		${css.code ? b `
+		const #css = {
+			code: "${css.code}",
+			map: ${css_sourcemap_enabled && css.map ? string_literal(css.map.toString()) : 'null'}
+		};` : null}
+
+		${component.extract_javascript(component.ast.module)}
+
+		${component.fully_hoisted}
+
+		const ${name} = @create_ssr_component(($$result, $$props, $$bindings, #slots) => {
+			${blocks}
+		});
+	`;
+        return { js, css };
+    }
+    function trim(nodes) {
+        let start = 0;
+        for (; start < nodes.length; start += 1) {
+            const node = nodes[start];
+            if (node.type !== 'Text')
+                break;
+            node.data = node.data.replace(/^\s+/, '');
+            if (node.data)
+                break;
+        }
+        let end = nodes.length;
+        for (; end > start; end -= 1) {
+            const node = nodes[end - 1];
+            if (node.type !== 'Text')
+                break;
+            node.data = node.data.replace(/\s+$/, '');
+            if (node.data)
+                break;
+        }
+        return nodes.slice(start, end);
+    }
+
+    const wrappers$1 = { esm, cjs };
+    function create_module(program, format, name, banner, sveltePath = 'svelte', helpers, globals, imports, module_exports, exports_from) {
+        const internal_path = `${sveltePath}/internal`;
+        helpers.sort((a, b) => (a.name < b.name) ? -1 : 1);
+        globals.sort((a, b) => (a.name < b.name) ? -1 : 1);
+        const formatter = wrappers$1[format];
+        if (!formatter) {
+            throw new Error(`options.format is invalid (must be ${list(Object.keys(wrappers$1))})`);
+        }
+        return formatter(program, name, banner, sveltePath, internal_path, helpers, globals, imports, module_exports, exports_from);
+    }
+    function edit_source(source, sveltePath) {
+        return source === 'svelte' || source.startsWith('svelte/')
+            ? source.replace('svelte', sveltePath)
+            : source;
+    }
+    function get_internal_globals(globals, helpers) {
+        return globals.length > 0 && {
+            type: 'VariableDeclaration',
+            kind: 'const',
+            declarations: [{
+                    type: 'VariableDeclarator',
+                    id: {
+                        type: 'ObjectPattern',
+                        properties: globals.map(g => ({
+                            type: 'Property',
+                            method: false,
+                            shorthand: false,
+                            computed: false,
+                            key: { type: 'Identifier', name: g.name },
+                            value: g.alias,
+                            kind: 'init'
+                        }))
+                    },
+                    init: helpers.find(({ name }) => name === 'globals').alias
+                }]
+        };
+    }
+    function esm(program, name, banner, sveltePath, internal_path, helpers, globals, imports, module_exports, exports_from) {
+        const import_declaration = {
+            type: 'ImportDeclaration',
+            specifiers: helpers.map(h => ({
+                type: 'ImportSpecifier',
+                local: h.alias,
+                imported: { type: 'Identifier', name: h.name }
+            })),
+            source: { type: 'Literal', value: internal_path }
+        };
+        const internal_globals = get_internal_globals(globals, helpers);
+        // edit user imports
+        function rewrite_import(node) {
+            const value = edit_source(node.source.value, sveltePath);
+            if (node.source.value !== value) {
+                node.source.value = value;
+                node.source.raw = null;
+            }
+        }
+        imports.forEach(rewrite_import);
+        exports_from.forEach(rewrite_import);
+        const exports = module_exports.length > 0 && {
+            type: 'ExportNamedDeclaration',
+            specifiers: module_exports.map(x => ({
+                type: 'Specifier',
+                local: { type: 'Identifier', name: x.name },
+                exported: { type: 'Identifier', name: x.as }
+            }))
+        };
+        program.body = b `
+		/* ${banner} */
+
+		${import_declaration}
+		${internal_globals}
+		${imports}
+		${exports_from}
+
+		${program.body}
+
+		export default ${name};
+		${exports}
+	`;
+    }
+    function cjs(program, name, banner, sveltePath, internal_path, helpers, globals, imports, module_exports, exports_from) {
+        const internal_requires = {
+            type: 'VariableDeclaration',
+            kind: 'const',
+            declarations: [{
+                    type: 'VariableDeclarator',
+                    id: {
+                        type: 'ObjectPattern',
+                        properties: helpers.map(h => ({
+                            type: 'Property',
+                            method: false,
+                            shorthand: false,
+                            computed: false,
+                            key: { type: 'Identifier', name: h.name },
+                            value: h.alias,
+                            kind: 'init'
+                        }))
+                    },
+                    init: x `require("${internal_path}")`
+                }]
+        };
+        const internal_globals = get_internal_globals(globals, helpers);
+        const user_requires = imports.map(node => {
+            const init = x `require("${edit_source(node.source.value, sveltePath)}")`;
+            if (node.specifiers.length === 0) {
+                return b `${init};`;
+            }
+            return {
+                type: 'VariableDeclaration',
+                kind: 'const',
+                declarations: [{
+                        type: 'VariableDeclarator',
+                        id: node.specifiers[0].type === 'ImportNamespaceSpecifier'
+                            ? { type: 'Identifier', name: node.specifiers[0].local.name }
+                            : {
+                                type: 'ObjectPattern',
+                                properties: node.specifiers.map(s => ({
+                                    type: 'Property',
+                                    method: false,
+                                    shorthand: false,
+                                    computed: false,
+                                    key: s.type === 'ImportSpecifier' ? s.imported : { type: 'Identifier', name: 'default' },
+                                    value: s.local,
+                                    kind: 'init'
+                                }))
+                            },
+                        init
+                    }]
+            };
+        });
+        const exports = module_exports.map(x => b `exports.${{ type: 'Identifier', name: x.as }} = ${{ type: 'Identifier', name: x.name }};`);
+        const user_exports_from = exports_from.map(node => {
+            const init = x `require("${edit_source(node.source.value, sveltePath)}")`;
+            return node.specifiers.map(specifier => {
+                return b `exports.${specifier.exported} = ${init}.${specifier.local};`;
+            });
+        });
+        program.body = b `
+		/* ${banner} */
+
+		"use strict";
+		${internal_requires}
+		${internal_globals}
+		${user_requires}
+		${user_exports_from}
+
+		${program.body}
+
+		exports.default = ${name};
+		${exports}
+	`;
+    }
+
+    var Chunk = function Chunk(start, end, content) {
+    	this.start = start;
+    	this.end = end;
+    	this.original = content;
+
+    	this.intro = '';
+    	this.outro = '';
+
+    	this.content = content;
+    	this.storeName = false;
+    	this.edited = false;
+
+    	// we make these non-enumerable, for sanity while debugging
+    	Object.defineProperties(this, {
+    		previous: { writable: true, value: null },
+    		next:     { writable: true, value: null }
+    	});
+    };
+
+    Chunk.prototype.appendLeft = function appendLeft (content) {
+    	this.outro += content;
+    };
+
+    Chunk.prototype.appendRight = function appendRight (content) {
+    	this.intro = this.intro + content;
+    };
+
+    Chunk.prototype.clone = function clone () {
+    	var chunk = new Chunk(this.start, this.end, this.original);
+
+    	chunk.intro = this.intro;
+    	chunk.outro = this.outro;
+    	chunk.content = this.content;
+    	chunk.storeName = this.storeName;
+    	chunk.edited = this.edited;
+
+    	return chunk;
+    };
+
+    Chunk.prototype.contains = function contains (index) {
+    	return this.start < index && index < this.end;
+    };
+
+    Chunk.prototype.eachNext = function eachNext (fn) {
+    	var chunk = this;
+    	while (chunk) {
+    		fn(chunk);
+    		chunk = chunk.next;
+    	}
+    };
+
+    Chunk.prototype.eachPrevious = function eachPrevious (fn) {
+    	var chunk = this;
+    	while (chunk) {
+    		fn(chunk);
+    		chunk = chunk.previous;
+    	}
+    };
+
+    Chunk.prototype.edit = function edit (content, storeName, contentOnly) {
+    	this.content = content;
+    	if (!contentOnly) {
+    		this.intro = '';
+    		this.outro = '';
+    	}
+    	this.storeName = storeName;
+
+    	this.edited = true;
+
+    	return this;
+    };
+
+    Chunk.prototype.prependLeft = function prependLeft (content) {
+    	this.outro = content + this.outro;
+    };
+
+    Chunk.prototype.prependRight = function prependRight (content) {
+    	this.intro = content + this.intro;
+    };
+
+    Chunk.prototype.split = function split (index) {
+    	var sliceIndex = index - this.start;
+
+    	var originalBefore = this.original.slice(0, sliceIndex);
+    	var originalAfter = this.original.slice(sliceIndex);
+
+    	this.original = originalBefore;
+
+    	var newChunk = new Chunk(index, this.end, originalAfter);
+    	newChunk.outro = this.outro;
+    	this.outro = '';
+
+    	this.end = index;
+
+    	if (this.edited) {
+    		// TODO is this block necessary?...
+    		newChunk.edit('', false);
+    		this.content = '';
+    	} else {
+    		this.content = originalBefore;
+    	}
+
+    	newChunk.next = this.next;
+    	if (newChunk.next) { newChunk.next.previous = newChunk; }
+    	newChunk.previous = this;
+    	this.next = newChunk;
+
+    	return newChunk;
+    };
+
+    Chunk.prototype.toString = function toString () {
+    	return this.intro + this.content + this.outro;
+    };
+
+    Chunk.prototype.trimEnd = function trimEnd (rx) {
+    	this.outro = this.outro.replace(rx, '');
+    	if (this.outro.length) { return true; }
+
+    	var trimmed = this.content.replace(rx, '');
+
+    	if (trimmed.length) {
+    		if (trimmed !== this.content) {
+    			this.split(this.start + trimmed.length).edit('', undefined, true);
+    		}
+    		return true;
+
+    	} else {
+    		this.edit('', undefined, true);
+
+    		this.intro = this.intro.replace(rx, '');
+    		if (this.intro.length) { return true; }
+    	}
+    };
+
+    Chunk.prototype.trimStart = function trimStart (rx) {
+    	this.intro = this.intro.replace(rx, '');
+    	if (this.intro.length) { return true; }
+
+    	var trimmed = this.content.replace(rx, '');
+
+    	if (trimmed.length) {
+    		if (trimmed !== this.content) {
+    			this.split(this.end - trimmed.length);
+    			this.edit('', undefined, true);
+    		}
+    		return true;
+
+    	} else {
+    		this.edit('', undefined, true);
+
+    		this.outro = this.outro.replace(rx, '');
+    		if (this.outro.length) { return true; }
+    	}
+    };
+
+    var btoa$2 = function () {
+    	throw new Error('Unsupported environment: `window.btoa` or `Buffer` should be supported.');
+    };
+    if (typeof window !== 'undefined' && typeof window.btoa === 'function') {
+    	btoa$2 = function (str) { return window.btoa(unescape(encodeURIComponent(str))); };
+    } else if (typeof Buffer === 'function') {
+    	btoa$2 = function (str) { return Buffer.from(str, 'utf-8').toString('base64'); };
+    }
+
+    var SourceMap$1 = function SourceMap(properties) {
+    	this.version = 3;
+    	this.file = properties.file;
+    	this.sources = properties.sources;
+    	this.sourcesContent = properties.sourcesContent;
+    	this.names = properties.names;
+    	this.mappings = encode(properties.mappings);
+    };
+
+    SourceMap$1.prototype.toString = function toString () {
+    	return JSON.stringify(this);
+    };
+
+    SourceMap$1.prototype.toUrl = function toUrl () {
+    	return 'data:application/json;charset=utf-8;base64,' + btoa$2(this.toString());
+    };
+
+    function guessIndent(code) {
+    	var lines = code.split('\n');
+
+    	var tabbed = lines.filter(function (line) { return /^\t+/.test(line); });
+    	var spaced = lines.filter(function (line) { return /^ {2,}/.test(line); });
+
+    	if (tabbed.length === 0 && spaced.length === 0) {
+    		return null;
+    	}
+
+    	// More lines tabbed than spaced? Assume tabs, and
+    	// default to tabs in the case of a tie (or nothing
+    	// to go on)
+    	if (tabbed.length >= spaced.length) {
+    		return '\t';
+    	}
+
+    	// Otherwise, we need to guess the multiple
+    	var min = spaced.reduce(function (previous, current) {
+    		var numSpaces = /^ +/.exec(current)[0].length;
+    		return Math.min(numSpaces, previous);
+    	}, Infinity);
+
+    	return new Array(min + 1).join(' ');
+    }
+
+    function getRelativePath(from, to) {
+    	var fromParts = from.split(/[/\\]/);
+    	var toParts = to.split(/[/\\]/);
+
+    	fromParts.pop(); // get dirname
+
+    	while (fromParts[0] === toParts[0]) {
+    		fromParts.shift();
+    		toParts.shift();
+    	}
+
+    	if (fromParts.length) {
+    		var i = fromParts.length;
+    		while (i--) { fromParts[i] = '..'; }
+    	}
+
+    	return fromParts.concat(toParts).join('/');
+    }
+
+    var toString$1 = Object.prototype.toString;
+
+    function isObject(thing) {
+    	return toString$1.call(thing) === '[object Object]';
+    }
+
+    function getLocator$1(source) {
+    	var originalLines = source.split('\n');
+    	var lineOffsets = [];
+
+    	for (var i = 0, pos = 0; i < originalLines.length; i++) {
+    		lineOffsets.push(pos);
+    		pos += originalLines[i].length + 1;
+    	}
+
+    	return function locate(index) {
+    		var i = 0;
+    		var j = lineOffsets.length;
+    		while (i < j) {
+    			var m = (i + j) >> 1;
+    			if (index < lineOffsets[m]) {
+    				j = m;
+    			} else {
+    				i = m + 1;
+    			}
+    		}
+    		var line = i - 1;
+    		var column = index - lineOffsets[line];
+    		return { line: line, column: column };
+    	};
+    }
+
+    var Mappings = function Mappings(hires) {
+    	this.hires = hires;
+    	this.generatedCodeLine = 0;
+    	this.generatedCodeColumn = 0;
+    	this.raw = [];
+    	this.rawSegments = this.raw[this.generatedCodeLine] = [];
+    	this.pending = null;
+    };
+
+    Mappings.prototype.addEdit = function addEdit (sourceIndex, content, loc, nameIndex) {
+    	if (content.length) {
+    		var segment = [this.generatedCodeColumn, sourceIndex, loc.line, loc.column];
+    		if (nameIndex >= 0) {
+    			segment.push(nameIndex);
+    		}
+    		this.rawSegments.push(segment);
+    	} else if (this.pending) {
+    		this.rawSegments.push(this.pending);
+    	}
+
+    	this.advance(content);
+    	this.pending = null;
+    };
+
+    Mappings.prototype.addUneditedChunk = function addUneditedChunk (sourceIndex, chunk, original, loc, sourcemapLocations) {
+    	var originalCharIndex = chunk.start;
+    	var first = true;
+
+    	while (originalCharIndex < chunk.end) {
+    		if (this.hires || first || sourcemapLocations[originalCharIndex]) {
+    			this.rawSegments.push([this.generatedCodeColumn, sourceIndex, loc.line, loc.column]);
+    		}
+
+    		if (original[originalCharIndex] === '\n') {
+    			loc.line += 1;
+    			loc.column = 0;
+    			this.generatedCodeLine += 1;
+    			this.raw[this.generatedCodeLine] = this.rawSegments = [];
+    			this.generatedCodeColumn = 0;
+    		} else {
+    			loc.column += 1;
+    			this.generatedCodeColumn += 1;
+    		}
+
+    		originalCharIndex += 1;
+    		first = false;
+    	}
+
+    	this.pending = [this.generatedCodeColumn, sourceIndex, loc.line, loc.column];
+    };
+
+    Mappings.prototype.advance = function advance (str) {
+    	if (!str) { return; }
+
+    	var lines = str.split('\n');
+
+    	if (lines.length > 1) {
+    		for (var i = 0; i < lines.length - 1; i++) {
+    			this.generatedCodeLine++;
+    			this.raw[this.generatedCodeLine] = this.rawSegments = [];
+    		}
+    		this.generatedCodeColumn = 0;
+    	}
+
+    	this.generatedCodeColumn += lines[lines.length - 1].length;
+    };
+
+    var n = '\n';
+
+    var warned = {
+    	insertLeft: false,
+    	insertRight: false,
+    	storeName: false
+    };
+
+    var MagicString = function MagicString(string, options) {
+    	if ( options === void 0 ) options = {};
+
+    	var chunk = new Chunk(0, string.length, string);
+
+    	Object.defineProperties(this, {
+    		original:              { writable: true, value: string },
+    		outro:                 { writable: true, value: '' },
+    		intro:                 { writable: true, value: '' },
+    		firstChunk:            { writable: true, value: chunk },
+    		lastChunk:             { writable: true, value: chunk },
+    		lastSearchedChunk:     { writable: true, value: chunk },
+    		byStart:               { writable: true, value: {} },
+    		byEnd:                 { writable: true, value: {} },
+    		filename:              { writable: true, value: options.filename },
+    		indentExclusionRanges: { writable: true, value: options.indentExclusionRanges },
+    		sourcemapLocations:    { writable: true, value: {} },
+    		storedNames:           { writable: true, value: {} },
+    		indentStr:             { writable: true, value: guessIndent(string) }
+    	});
+
+    	this.byStart[0] = chunk;
+    	this.byEnd[string.length] = chunk;
+    };
+
+    MagicString.prototype.addSourcemapLocation = function addSourcemapLocation (char) {
+    	this.sourcemapLocations[char] = true;
+    };
+
+    MagicString.prototype.append = function append (content) {
+    	if (typeof content !== 'string') { throw new TypeError('outro content must be a string'); }
+
+    	this.outro += content;
+    	return this;
+    };
+
+    MagicString.prototype.appendLeft = function appendLeft (index, content) {
+    	if (typeof content !== 'string') { throw new TypeError('inserted content must be a string'); }
+
+    	this._split(index);
+
+    	var chunk = this.byEnd[index];
+
+    	if (chunk) {
+    		chunk.appendLeft(content);
+    	} else {
+    		this.intro += content;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.appendRight = function appendRight (index, content) {
+    	if (typeof content !== 'string') { throw new TypeError('inserted content must be a string'); }
+
+    	this._split(index);
+
+    	var chunk = this.byStart[index];
+
+    	if (chunk) {
+    		chunk.appendRight(content);
+    	} else {
+    		this.outro += content;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.clone = function clone () {
+    	var cloned = new MagicString(this.original, { filename: this.filename });
+
+    	var originalChunk = this.firstChunk;
+    	var clonedChunk = (cloned.firstChunk = cloned.lastSearchedChunk = originalChunk.clone());
+
+    	while (originalChunk) {
+    		cloned.byStart[clonedChunk.start] = clonedChunk;
+    		cloned.byEnd[clonedChunk.end] = clonedChunk;
+
+    		var nextOriginalChunk = originalChunk.next;
+    		var nextClonedChunk = nextOriginalChunk && nextOriginalChunk.clone();
+
+    		if (nextClonedChunk) {
+    			clonedChunk.next = nextClonedChunk;
+    			nextClonedChunk.previous = clonedChunk;
+
+    			clonedChunk = nextClonedChunk;
+    		}
+
+    		originalChunk = nextOriginalChunk;
+    	}
+
+    	cloned.lastChunk = clonedChunk;
+
+    	if (this.indentExclusionRanges) {
+    		cloned.indentExclusionRanges = this.indentExclusionRanges.slice();
+    	}
+
+    	Object.keys(this.sourcemapLocations).forEach(function (loc) {
+    		cloned.sourcemapLocations[loc] = true;
+    	});
+
+    	return cloned;
+    };
+
+    MagicString.prototype.generateDecodedMap = function generateDecodedMap (options) {
+    		var this$1$1 = this;
+
+    	options = options || {};
+
+    	var sourceIndex = 0;
+    	var names = Object.keys(this.storedNames);
+    	var mappings = new Mappings(options.hires);
+
+    	var locate = getLocator$1(this.original);
+
+    	if (this.intro) {
+    		mappings.advance(this.intro);
+    	}
+
+    	this.firstChunk.eachNext(function (chunk) {
+    		var loc = locate(chunk.start);
+
+    		if (chunk.intro.length) { mappings.advance(chunk.intro); }
+
+    		if (chunk.edited) {
+    			mappings.addEdit(
+    				sourceIndex,
+    				chunk.content,
+    				loc,
+    				chunk.storeName ? names.indexOf(chunk.original) : -1
+    			);
+    		} else {
+    			mappings.addUneditedChunk(sourceIndex, chunk, this$1$1.original, loc, this$1$1.sourcemapLocations);
+    		}
+
+    		if (chunk.outro.length) { mappings.advance(chunk.outro); }
+    	});
+
+    	return {
+    		file: options.file ? options.file.split(/[/\\]/).pop() : null,
+    		sources: [options.source ? getRelativePath(options.file || '', options.source) : null],
+    		sourcesContent: options.includeContent ? [this.original] : [null],
+    		names: names,
+    		mappings: mappings.raw
+    	};
+    };
+
+    MagicString.prototype.generateMap = function generateMap (options) {
+    	return new SourceMap$1(this.generateDecodedMap(options));
+    };
+
+    MagicString.prototype.getIndentString = function getIndentString () {
+    	return this.indentStr === null ? '\t' : this.indentStr;
+    };
+
+    MagicString.prototype.indent = function indent (indentStr, options) {
+    	var pattern = /^[^\r\n]/gm;
+
+    	if (isObject(indentStr)) {
+    		options = indentStr;
+    		indentStr = undefined;
+    	}
+
+    	indentStr = indentStr !== undefined ? indentStr : this.indentStr || '\t';
+
+    	if (indentStr === '') { return this; } // noop
+
+    	options = options || {};
+
+    	// Process exclusion ranges
+    	var isExcluded = {};
+
+    	if (options.exclude) {
+    		var exclusions =
+    			typeof options.exclude[0] === 'number' ? [options.exclude] : options.exclude;
+    		exclusions.forEach(function (exclusion) {
+    			for (var i = exclusion[0]; i < exclusion[1]; i += 1) {
+    				isExcluded[i] = true;
+    			}
+    		});
+    	}
+
+    	var shouldIndentNextCharacter = options.indentStart !== false;
+    	var replacer = function (match) {
+    		if (shouldIndentNextCharacter) { return ("" + indentStr + match); }
+    		shouldIndentNextCharacter = true;
+    		return match;
+    	};
+
+    	this.intro = this.intro.replace(pattern, replacer);
+
+    	var charIndex = 0;
+    	var chunk = this.firstChunk;
+
+    	while (chunk) {
+    		var end = chunk.end;
+
+    		if (chunk.edited) {
+    			if (!isExcluded[charIndex]) {
+    				chunk.content = chunk.content.replace(pattern, replacer);
+
+    				if (chunk.content.length) {
+    					shouldIndentNextCharacter = chunk.content[chunk.content.length - 1] === '\n';
+    				}
+    			}
+    		} else {
+    			charIndex = chunk.start;
+
+    			while (charIndex < end) {
+    				if (!isExcluded[charIndex]) {
+    					var char = this.original[charIndex];
+
+    					if (char === '\n') {
+    						shouldIndentNextCharacter = true;
+    					} else if (char !== '\r' && shouldIndentNextCharacter) {
+    						shouldIndentNextCharacter = false;
+
+    						if (charIndex === chunk.start) {
+    							chunk.prependRight(indentStr);
+    						} else {
+    							this._splitChunk(chunk, charIndex);
+    							chunk = chunk.next;
+    							chunk.prependRight(indentStr);
+    						}
+    					}
+    				}
+
+    				charIndex += 1;
+    			}
+    		}
+
+    		charIndex = chunk.end;
+    		chunk = chunk.next;
+    	}
+
+    	this.outro = this.outro.replace(pattern, replacer);
+
+    	return this;
+    };
+
+    MagicString.prototype.insert = function insert () {
+    	throw new Error('magicString.insert(...) is deprecated. Use prependRight(...) or appendLeft(...)');
+    };
+
+    MagicString.prototype.insertLeft = function insertLeft (index, content) {
+    	if (!warned.insertLeft) {
+    		console.warn('magicString.insertLeft(...) is deprecated. Use magicString.appendLeft(...) instead'); // eslint-disable-line no-console
+    		warned.insertLeft = true;
+    	}
+
+    	return this.appendLeft(index, content);
+    };
+
+    MagicString.prototype.insertRight = function insertRight (index, content) {
+    	if (!warned.insertRight) {
+    		console.warn('magicString.insertRight(...) is deprecated. Use magicString.prependRight(...) instead'); // eslint-disable-line no-console
+    		warned.insertRight = true;
+    	}
+
+    	return this.prependRight(index, content);
+    };
+
+    MagicString.prototype.move = function move (start, end, index) {
+    	if (index >= start && index <= end) { throw new Error('Cannot move a selection inside itself'); }
+
+    	this._split(start);
+    	this._split(end);
+    	this._split(index);
+
+    	var first = this.byStart[start];
+    	var last = this.byEnd[end];
+
+    	var oldLeft = first.previous;
+    	var oldRight = last.next;
+
+    	var newRight = this.byStart[index];
+    	if (!newRight && last === this.lastChunk) { return this; }
+    	var newLeft = newRight ? newRight.previous : this.lastChunk;
+
+    	if (oldLeft) { oldLeft.next = oldRight; }
+    	if (oldRight) { oldRight.previous = oldLeft; }
+
+    	if (newLeft) { newLeft.next = first; }
+    	if (newRight) { newRight.previous = last; }
+
+    	if (!first.previous) { this.firstChunk = last.next; }
+    	if (!last.next) {
+    		this.lastChunk = first.previous;
+    		this.lastChunk.next = null;
+    	}
+
+    	first.previous = newLeft;
+    	last.next = newRight || null;
+
+    	if (!newLeft) { this.firstChunk = first; }
+    	if (!newRight) { this.lastChunk = last; }
+    	return this;
+    };
+
+    MagicString.prototype.overwrite = function overwrite (start, end, content, options) {
+    	if (typeof content !== 'string') { throw new TypeError('replacement content must be a string'); }
+
+    	while (start < 0) { start += this.original.length; }
+    	while (end < 0) { end += this.original.length; }
+
+    	if (end > this.original.length) { throw new Error('end is out of bounds'); }
+    	if (start === end)
+    		{ throw new Error('Cannot overwrite a zero-length range – use appendLeft or prependRight instead'); }
+
+    	this._split(start);
+    	this._split(end);
+
+    	if (options === true) {
+    		if (!warned.storeName) {
+    			console.warn('The final argument to magicString.overwrite(...) should be an options object. See https://github.com/rich-harris/magic-string'); // eslint-disable-line no-console
+    			warned.storeName = true;
+    		}
+
+    		options = { storeName: true };
+    	}
+    	var storeName = options !== undefined ? options.storeName : false;
+    	var contentOnly = options !== undefined ? options.contentOnly : false;
+
+    	if (storeName) {
+    		var original = this.original.slice(start, end);
+    		this.storedNames[original] = true;
+    	}
+
+    	var first = this.byStart[start];
+    	var last = this.byEnd[end];
+
+    	if (first) {
+    		if (end > first.end && first.next !== this.byStart[first.end]) {
+    			throw new Error('Cannot overwrite across a split point');
+    		}
+
+    		first.edit(content, storeName, contentOnly);
+
+    		if (first !== last) {
+    			var chunk = first.next;
+    			while (chunk !== last) {
+    				chunk.edit('', false);
+    				chunk = chunk.next;
+    			}
+
+    			chunk.edit('', false);
+    		}
+    	} else {
+    		// must be inserting at the end
+    		var newChunk = new Chunk(start, end, '').edit(content, storeName);
+
+    		// TODO last chunk in the array may not be the last chunk, if it's moved...
+    		last.next = newChunk;
+    		newChunk.previous = last;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.prepend = function prepend (content) {
+    	if (typeof content !== 'string') { throw new TypeError('outro content must be a string'); }
+
+    	this.intro = content + this.intro;
+    	return this;
+    };
+
+    MagicString.prototype.prependLeft = function prependLeft (index, content) {
+    	if (typeof content !== 'string') { throw new TypeError('inserted content must be a string'); }
+
+    	this._split(index);
+
+    	var chunk = this.byEnd[index];
+
+    	if (chunk) {
+    		chunk.prependLeft(content);
+    	} else {
+    		this.intro = content + this.intro;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.prependRight = function prependRight (index, content) {
+    	if (typeof content !== 'string') { throw new TypeError('inserted content must be a string'); }
+
+    	this._split(index);
+
+    	var chunk = this.byStart[index];
+
+    	if (chunk) {
+    		chunk.prependRight(content);
+    	} else {
+    		this.outro = content + this.outro;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.remove = function remove (start, end) {
+    	while (start < 0) { start += this.original.length; }
+    	while (end < 0) { end += this.original.length; }
+
+    	if (start === end) { return this; }
+
+    	if (start < 0 || end > this.original.length) { throw new Error('Character is out of bounds'); }
+    	if (start > end) { throw new Error('end must be greater than start'); }
+
+    	this._split(start);
+    	this._split(end);
+
+    	var chunk = this.byStart[start];
+
+    	while (chunk) {
+    		chunk.intro = '';
+    		chunk.outro = '';
+    		chunk.edit('');
+
+    		chunk = end > chunk.end ? this.byStart[chunk.end] : null;
+    	}
+    	return this;
+    };
+
+    MagicString.prototype.lastChar = function lastChar () {
+    	if (this.outro.length)
+    		{ return this.outro[this.outro.length - 1]; }
+    	var chunk = this.lastChunk;
+    	do {
+    		if (chunk.outro.length)
+    			{ return chunk.outro[chunk.outro.length - 1]; }
+    		if (chunk.content.length)
+    			{ return chunk.content[chunk.content.length - 1]; }
+    		if (chunk.intro.length)
+    			{ return chunk.intro[chunk.intro.length - 1]; }
+    	} while (chunk = chunk.previous);
+    	if (this.intro.length)
+    		{ return this.intro[this.intro.length - 1]; }
+    	return '';
+    };
+
+    MagicString.prototype.lastLine = function lastLine () {
+    	var lineIndex = this.outro.lastIndexOf(n);
+    	if (lineIndex !== -1)
+    		{ return this.outro.substr(lineIndex + 1); }
+    	var lineStr = this.outro;
+    	var chunk = this.lastChunk;
+    	do {
+    		if (chunk.outro.length > 0) {
+    			lineIndex = chunk.outro.lastIndexOf(n);
+    			if (lineIndex !== -1)
+    				{ return chunk.outro.substr(lineIndex + 1) + lineStr; }
+    			lineStr = chunk.outro + lineStr;
+    		}
+
+    		if (chunk.content.length > 0) {
+    			lineIndex = chunk.content.lastIndexOf(n);
+    			if (lineIndex !== -1)
+    				{ return chunk.content.substr(lineIndex + 1) + lineStr; }
+    			lineStr = chunk.content + lineStr;
+    		}
+
+    		if (chunk.intro.length > 0) {
+    			lineIndex = chunk.intro.lastIndexOf(n);
+    			if (lineIndex !== -1)
+    				{ return chunk.intro.substr(lineIndex + 1) + lineStr; }
+    			lineStr = chunk.intro + lineStr;
+    		}
+    	} while (chunk = chunk.previous);
+    	lineIndex = this.intro.lastIndexOf(n);
+    	if (lineIndex !== -1)
+    		{ return this.intro.substr(lineIndex + 1) + lineStr; }
+    	return this.intro + lineStr;
+    };
+
+    MagicString.prototype.slice = function slice (start, end) {
+    		if ( start === void 0 ) start = 0;
+    		if ( end === void 0 ) end = this.original.length;
+
+    	while (start < 0) { start += this.original.length; }
+    	while (end < 0) { end += this.original.length; }
+
+    	var result = '';
+
+    	// find start chunk
+    	var chunk = this.firstChunk;
+    	while (chunk && (chunk.start > start || chunk.end <= start)) {
+    		// found end chunk before start
+    		if (chunk.start < end && chunk.end >= end) {
+    			return result;
+    		}
+
+    		chunk = chunk.next;
+    	}
+
+    	if (chunk && chunk.edited && chunk.start !== start)
+    		{ throw new Error(("Cannot use replaced character " + start + " as slice start anchor.")); }
+
+    	var startChunk = chunk;
+    	while (chunk) {
+    		if (chunk.intro && (startChunk !== chunk || chunk.start === start)) {
+    			result += chunk.intro;
+    		}
+
+    		var containsEnd = chunk.start < end && chunk.end >= end;
+    		if (containsEnd && chunk.edited && chunk.end !== end)
+    			{ throw new Error(("Cannot use replaced character " + end + " as slice end anchor.")); }
+
+    		var sliceStart = startChunk === chunk ? start - chunk.start : 0;
+    		var sliceEnd = containsEnd ? chunk.content.length + end - chunk.end : chunk.content.length;
+
+    		result += chunk.content.slice(sliceStart, sliceEnd);
+
+    		if (chunk.outro && (!containsEnd || chunk.end === end)) {
+    			result += chunk.outro;
+    		}
+
+    		if (containsEnd) {
+    			break;
+    		}
+
+    		chunk = chunk.next;
+    	}
+
+    	return result;
+    };
+
+    // TODO deprecate this? not really very useful
+    MagicString.prototype.snip = function snip (start, end) {
+    	var clone = this.clone();
+    	clone.remove(0, start);
+    	clone.remove(end, clone.original.length);
+
+    	return clone;
+    };
+
+    MagicString.prototype._split = function _split (index) {
+    	if (this.byStart[index] || this.byEnd[index]) { return; }
+
+    	var chunk = this.lastSearchedChunk;
+    	var searchForward = index > chunk.end;
+
+    	while (chunk) {
+    		if (chunk.contains(index)) { return this._splitChunk(chunk, index); }
+
+    		chunk = searchForward ? this.byStart[chunk.end] : this.byEnd[chunk.start];
+    	}
+    };
+
+    MagicString.prototype._splitChunk = function _splitChunk (chunk, index) {
+    	if (chunk.edited && chunk.content.length) {
+    		// zero-length edited chunks are a special case (overlapping replacements)
+    		var loc = getLocator$1(this.original)(index);
+    		throw new Error(
+    			("Cannot split a chunk that has already been edited (" + (loc.line) + ":" + (loc.column) + " – \"" + (chunk.original) + "\")")
+    		);
+    	}
+
+    	var newChunk = chunk.split(index);
+
+    	this.byEnd[index] = chunk;
+    	this.byStart[index] = newChunk;
+    	this.byEnd[newChunk.end] = newChunk;
+
+    	if (chunk === this.lastChunk) { this.lastChunk = newChunk; }
+
+    	this.lastSearchedChunk = chunk;
+    	return true;
+    };
+
+    MagicString.prototype.toString = function toString () {
+    	var str = this.intro;
+
+    	var chunk = this.firstChunk;
+    	while (chunk) {
+    		str += chunk.toString();
+    		chunk = chunk.next;
+    	}
+
+    	return str + this.outro;
+    };
+
+    MagicString.prototype.isEmpty = function isEmpty () {
+    	var chunk = this.firstChunk;
+    	do {
+    		if (chunk.intro.length && chunk.intro.trim() ||
+    				chunk.content.length && chunk.content.trim() ||
+    				chunk.outro.length && chunk.outro.trim())
+    			{ return false; }
+    	} while (chunk = chunk.next);
+    	return true;
+    };
+
+    MagicString.prototype.length = function length () {
+    	var chunk = this.firstChunk;
+    	var length = 0;
+    	do {
+    		length += chunk.intro.length + chunk.content.length + chunk.outro.length;
+    	} while (chunk = chunk.next);
+    	return length;
+    };
+
+    MagicString.prototype.trimLines = function trimLines () {
+    	return this.trim('[\\r\\n]');
+    };
+
+    MagicString.prototype.trim = function trim (charType) {
+    	return this.trimStart(charType).trimEnd(charType);
+    };
+
+    MagicString.prototype.trimEndAborted = function trimEndAborted (charType) {
+    	var rx = new RegExp((charType || '\\s') + '+$');
+
+    	this.outro = this.outro.replace(rx, '');
+    	if (this.outro.length) { return true; }
+
+    	var chunk = this.lastChunk;
+
+    	do {
+    		var end = chunk.end;
+    		var aborted = chunk.trimEnd(rx);
+
+    		// if chunk was trimmed, we have a new lastChunk
+    		if (chunk.end !== end) {
+    			if (this.lastChunk === chunk) {
+    				this.lastChunk = chunk.next;
+    			}
+
+    			this.byEnd[chunk.end] = chunk;
+    			this.byStart[chunk.next.start] = chunk.next;
+    			this.byEnd[chunk.next.end] = chunk.next;
+    		}
+
+    		if (aborted) { return true; }
+    		chunk = chunk.previous;
+    	} while (chunk);
+
+    	return false;
+    };
+
+    MagicString.prototype.trimEnd = function trimEnd (charType) {
+    	this.trimEndAborted(charType);
+    	return this;
+    };
+    MagicString.prototype.trimStartAborted = function trimStartAborted (charType) {
+    	var rx = new RegExp('^' + (charType || '\\s') + '+');
+
+    	this.intro = this.intro.replace(rx, '');
+    	if (this.intro.length) { return true; }
+
+    	var chunk = this.firstChunk;
+
+    	do {
+    		var end = chunk.end;
+    		var aborted = chunk.trimStart(rx);
+
+    		if (chunk.end !== end) {
+    			// special case...
+    			if (chunk === this.lastChunk) { this.lastChunk = chunk.next; }
+
+    			this.byEnd[chunk.end] = chunk;
+    			this.byStart[chunk.next.start] = chunk.next;
+    			this.byEnd[chunk.next.end] = chunk.next;
+    		}
+
+    		if (aborted) { return true; }
+    		chunk = chunk.next;
+    	} while (chunk);
+
+    	return false;
+    };
+
+    MagicString.prototype.trimStart = function trimStart (charType) {
+    	this.trimStartAborted(charType);
+    	return this;
+    };
+
+    const UNKNOWN = {};
+    function gather_possible_values(node, set) {
+        if (node.type === 'Literal') {
+            set.add(node.value);
+        }
+        else if (node.type === 'ConditionalExpression') {
+            gather_possible_values(node.consequent, set);
+            gather_possible_values(node.alternate, set);
+        }
+        else {
+            set.add(UNKNOWN);
+        }
+    }
 
     var BlockAppliesToNode;
     (function (BlockAppliesToNode) {
@@ -16118,34 +29918,2479 @@ var app = (function () {
         NodeExist[NodeExist["Probably"] = 1] = "Probably";
         NodeExist[NodeExist["Definitely"] = 2] = "Definitely";
     })(NodeExist || (NodeExist = {}));
+    const whitelist_attribute_selector = new Map([
+        ['details', new Set(['open'])],
+        ['dialog', new Set(['open'])]
+    ]);
+    class Selector$1 {
+        constructor(node, stylesheet) {
+            this.node = node;
+            this.stylesheet = stylesheet;
+            this.blocks = group_selectors(node);
+            // take trailing :global(...) selectors out of consideration
+            let i = this.blocks.length;
+            while (i > 0) {
+                if (!this.blocks[i - 1].global)
+                    break;
+                i -= 1;
+            }
+            this.local_blocks = this.blocks.slice(0, i);
+            const host_only = this.blocks.length === 1 && this.blocks[0].host;
+            const root_only = this.blocks.length === 1 && this.blocks[0].root;
+            this.used = this.local_blocks.length === 0 || host_only || root_only;
+        }
+        apply(node) {
+            const to_encapsulate = [];
+            apply_selector(this.local_blocks.slice(), node, to_encapsulate);
+            if (to_encapsulate.length > 0) {
+                to_encapsulate.forEach(({ node, block }) => {
+                    this.stylesheet.nodes_with_css_class.add(node);
+                    block.should_encapsulate = true;
+                });
+                this.used = true;
+            }
+        }
+        minify(code) {
+            let c = null;
+            this.blocks.forEach((block, i) => {
+                if (i > 0) {
+                    if (block.start - c > 1) {
+                        code.overwrite(c, block.start, block.combinator.name || ' ');
+                    }
+                }
+                c = block.end;
+            });
+        }
+        transform(code, attr, max_amount_class_specificity_increased) {
+            const amount_class_specificity_to_increase = max_amount_class_specificity_increased - this.blocks.filter(block => block.should_encapsulate).length;
+            function remove_global_pseudo_class(selector) {
+                const first = selector.children[0];
+                const last = selector.children[selector.children.length - 1];
+                code.remove(selector.start, first.start).remove(last.end, selector.end);
+            }
+            function encapsulate_block(block, attr) {
+                for (const selector of block.selectors) {
+                    if (selector.type === 'PseudoClassSelector' && selector.name === 'global') {
+                        remove_global_pseudo_class(selector);
+                    }
+                }
+                let i = block.selectors.length;
+                while (i--) {
+                    const selector = block.selectors[i];
+                    if (selector.type === 'PseudoElementSelector' || selector.type === 'PseudoClassSelector') {
+                        if (selector.name !== 'root' && selector.name !== 'host') {
+                            if (i === 0)
+                                code.prependRight(selector.start, attr);
+                        }
+                        continue;
+                    }
+                    if (selector.type === 'TypeSelector' && selector.name === '*') {
+                        code.overwrite(selector.start, selector.end, attr);
+                    }
+                    else {
+                        code.appendLeft(selector.end, attr);
+                    }
+                    break;
+                }
+            }
+            this.blocks.forEach((block, index) => {
+                if (block.global) {
+                    remove_global_pseudo_class(block.selectors[0]);
+                }
+                if (block.should_encapsulate)
+                    encapsulate_block(block, index === this.blocks.length - 1 ? attr.repeat(amount_class_specificity_to_increase + 1) : attr);
+            });
+        }
+        validate(component) {
+            let start = 0;
+            let end = this.blocks.length;
+            for (; start < end; start += 1) {
+                if (!this.blocks[start].global)
+                    break;
+            }
+            for (; end > start; end -= 1) {
+                if (!this.blocks[end - 1].global)
+                    break;
+            }
+            for (let i = start; i < end; i += 1) {
+                if (this.blocks[i].global) {
+                    return component.error(this.blocks[i].selectors[0], compiler_errors.css_invalid_global);
+                }
+            }
+            this.validate_global_with_multiple_selectors(component);
+        }
+        validate_global_with_multiple_selectors(component) {
+            if (this.blocks.length === 1 && this.blocks[0].selectors.length === 1) {
+                // standalone :global() with multiple selectors is OK
+                return;
+            }
+            for (const block of this.blocks) {
+                for (const selector of block.selectors) {
+                    if (selector.type === 'PseudoClassSelector' && selector.name === 'global') {
+                        if (/[^\\],(?!([^([]+[^\\]|[^([\\])[)\]])/.test(selector.children[0].value)) {
+                            component.error(selector, compiler_errors.css_invalid_global_selector);
+                        }
+                    }
+                }
+            }
+        }
+        get_amount_class_specificity_increased() {
+            let count = 0;
+            for (const block of this.blocks) {
+                if (block.should_encapsulate) {
+                    count++;
+                }
+            }
+            return count;
+        }
+    }
+    function apply_selector(blocks, node, to_encapsulate) {
+        const block = blocks.pop();
+        if (!block)
+            return false;
+        if (!node) {
+            return ((block.global && blocks.every(block => block.global)) ||
+                (block.host && blocks.length === 0));
+        }
+        switch (block_might_apply_to_node(block, node)) {
+            case BlockAppliesToNode.NotPossible:
+                return false;
+            case BlockAppliesToNode.UnknownSelectorType:
+                // bail. TODO figure out what these could be
+                to_encapsulate.push({ node, block });
+                return true;
+        }
+        if (block.combinator) {
+            if (block.combinator.type === 'WhiteSpace') {
+                for (const ancestor_block of blocks) {
+                    if (ancestor_block.global) {
+                        continue;
+                    }
+                    if (ancestor_block.host) {
+                        to_encapsulate.push({ node, block });
+                        return true;
+                    }
+                    let parent = node;
+                    while (parent = get_element_parent(parent)) {
+                        if (block_might_apply_to_node(ancestor_block, parent) !== BlockAppliesToNode.NotPossible) {
+                            to_encapsulate.push({ node: parent, block: ancestor_block });
+                        }
+                    }
+                    if (to_encapsulate.length) {
+                        to_encapsulate.push({ node, block });
+                        return true;
+                    }
+                }
+                if (blocks.every(block => block.global)) {
+                    to_encapsulate.push({ node, block });
+                    return true;
+                }
+                return false;
+            }
+            else if (block.combinator.name === '>') {
+                const has_global_parent = blocks.every(block => block.global);
+                if (has_global_parent || apply_selector(blocks, get_element_parent(node), to_encapsulate)) {
+                    to_encapsulate.push({ node, block });
+                    return true;
+                }
+                return false;
+            }
+            else if (block.combinator.name === '+' || block.combinator.name === '~') {
+                const siblings = get_possible_element_siblings(node, block.combinator.name === '+');
+                let has_match = false;
+                // NOTE: if we have :global(), we couldn't figure out what is selected within `:global` due to the
+                // css-tree limitation that does not parse the inner selector of :global
+                // so unless we are sure there will be no sibling to match, we will consider it as matched
+                const has_global = blocks.some(block => block.global);
+                if (has_global) {
+                    if (siblings.size === 0 && get_element_parent(node) !== null) {
+                        return false;
+                    }
+                    to_encapsulate.push({ node, block });
+                    return true;
+                }
+                for (const possible_sibling of siblings.keys()) {
+                    if (apply_selector(blocks.slice(), possible_sibling, to_encapsulate)) {
+                        to_encapsulate.push({ node, block });
+                        has_match = true;
+                    }
+                }
+                return has_match;
+            }
+            // TODO other combinators
+            to_encapsulate.push({ node, block });
+            return true;
+        }
+        to_encapsulate.push({ node, block });
+        return true;
+    }
+    function block_might_apply_to_node(block, node) {
+        let i = block.selectors.length;
+        while (i--) {
+            const selector = block.selectors[i];
+            const name = typeof selector.name === 'string' && selector.name.replace(/\\(.)/g, '$1');
+            if (selector.type === 'PseudoClassSelector' && (name === 'host' || name === 'root')) {
+                return BlockAppliesToNode.NotPossible;
+            }
+            if (block.selectors.length === 1 && selector.type === 'PseudoClassSelector' && name === 'global') {
+                return BlockAppliesToNode.NotPossible;
+            }
+            if (selector.type === 'PseudoClassSelector' || selector.type === 'PseudoElementSelector') {
+                continue;
+            }
+            if (selector.type === 'ClassSelector') {
+                if (!attribute_matches(node, 'class', name, '~=', false) && !node.classes.some(c => c.name === name))
+                    return BlockAppliesToNode.NotPossible;
+            }
+            else if (selector.type === 'IdSelector') {
+                if (!attribute_matches(node, 'id', name, '=', false))
+                    return BlockAppliesToNode.NotPossible;
+            }
+            else if (selector.type === 'AttributeSelector') {
+                if (!(whitelist_attribute_selector.has(node.name.toLowerCase()) && whitelist_attribute_selector.get(node.name.toLowerCase()).has(selector.name.name.toLowerCase())) &&
+                    !attribute_matches(node, selector.name.name, selector.value && unquote(selector.value), selector.matcher, selector.flags)) {
+                    return BlockAppliesToNode.NotPossible;
+                }
+            }
+            else if (selector.type === 'TypeSelector') {
+                if (node.name.toLowerCase() !== name.toLowerCase() && name !== '*')
+                    return BlockAppliesToNode.NotPossible;
+            }
+            else {
+                return BlockAppliesToNode.UnknownSelectorType;
+            }
+        }
+        return BlockAppliesToNode.Possible;
+    }
+    function test_attribute(operator, expected_value, case_insensitive, value) {
+        if (case_insensitive) {
+            expected_value = expected_value.toLowerCase();
+            value = value.toLowerCase();
+        }
+        switch (operator) {
+            case '=': return value === expected_value;
+            case '~=': return value.split(/\s/).includes(expected_value);
+            case '|=': return `${value}-`.startsWith(`${expected_value}-`);
+            case '^=': return value.startsWith(expected_value);
+            case '$=': return value.endsWith(expected_value);
+            case '*=': return value.includes(expected_value);
+            default: throw new Error("this shouldn't happen");
+        }
+    }
+    function attribute_matches(node, name, expected_value, operator, case_insensitive) {
+        const spread = node.attributes.find(attr => attr.type === 'Spread');
+        if (spread)
+            return true;
+        if (node.bindings.some((binding) => binding.name === name))
+            return true;
+        const attr = node.attributes.find((attr) => attr.name === name);
+        if (!attr)
+            return false;
+        if (attr.is_true)
+            return operator === null;
+        if (!expected_value)
+            return true;
+        if (attr.chunks.length === 1) {
+            const value = attr.chunks[0];
+            if (!value)
+                return false;
+            if (value.type === 'Text')
+                return test_attribute(operator, expected_value, case_insensitive, value.data);
+        }
+        const possible_values = new Set();
+        let prev_values = [];
+        for (const chunk of attr.chunks) {
+            const current_possible_values = new Set();
+            if (chunk.type === 'Text') {
+                current_possible_values.add(chunk.data);
+            }
+            else {
+                gather_possible_values(chunk.node, current_possible_values);
+            }
+            // impossible to find out all combinations
+            if (current_possible_values.has(UNKNOWN))
+                return true;
+            if (prev_values.length > 0) {
+                const start_with_space = [];
+                const remaining = [];
+                current_possible_values.forEach((current_possible_value) => {
+                    if (/^\s/.test(current_possible_value)) {
+                        start_with_space.push(current_possible_value);
+                    }
+                    else {
+                        remaining.push(current_possible_value);
+                    }
+                });
+                if (remaining.length > 0) {
+                    if (start_with_space.length > 0) {
+                        prev_values.forEach(prev_value => possible_values.add(prev_value));
+                    }
+                    const combined = [];
+                    prev_values.forEach((prev_value) => {
+                        remaining.forEach((value) => {
+                            combined.push(prev_value + value);
+                        });
+                    });
+                    prev_values = combined;
+                    start_with_space.forEach((value) => {
+                        if (/\s$/.test(value)) {
+                            possible_values.add(value);
+                        }
+                        else {
+                            prev_values.push(value);
+                        }
+                    });
+                    continue;
+                }
+                else {
+                    prev_values.forEach(prev_value => possible_values.add(prev_value));
+                    prev_values = [];
+                }
+            }
+            current_possible_values.forEach((current_possible_value) => {
+                if (/\s$/.test(current_possible_value)) {
+                    possible_values.add(current_possible_value);
+                }
+                else {
+                    prev_values.push(current_possible_value);
+                }
+            });
+            if (prev_values.length < current_possible_values.size) {
+                prev_values.push(' ');
+            }
+            if (prev_values.length > 20) {
+                // might grow exponentially, bail out
+                return true;
+            }
+        }
+        prev_values.forEach(prev_value => possible_values.add(prev_value));
+        if (possible_values.has(UNKNOWN))
+            return true;
+        for (const value of possible_values) {
+            if (test_attribute(operator, expected_value, case_insensitive, value))
+                return true;
+        }
+        return false;
+    }
+    function unquote(value) {
+        if (value.type === 'Identifier')
+            return value.name;
+        const str = value.value;
+        if (str[0] === str[str.length - 1] && str[0] === "'" || str[0] === '"') {
+            return str.slice(1, str.length - 1);
+        }
+        return str;
+    }
+    function get_element_parent(node) {
+        let parent = node;
+        while ((parent = parent.parent) && parent.type !== 'Element')
+            ;
+        return parent;
+    }
+    function get_possible_element_siblings(node, adjacent_only) {
+        const result = new Map();
+        let prev = node;
+        while (prev = prev.prev) {
+            if (prev.type === 'Element') {
+                if (!prev.attributes.find(attr => attr.type === 'Attribute' && attr.name.toLowerCase() === 'slot')) {
+                    result.set(prev, NodeExist.Definitely);
+                }
+                if (adjacent_only) {
+                    break;
+                }
+            }
+            else if (prev.type === 'EachBlock' || prev.type === 'IfBlock' || prev.type === 'AwaitBlock') {
+                const possible_last_child = get_possible_last_child(prev, adjacent_only);
+                add_to_map(possible_last_child, result);
+                if (adjacent_only && has_definite_elements(possible_last_child)) {
+                    return result;
+                }
+            }
+        }
+        if (!prev || !adjacent_only) {
+            let parent = node;
+            let skip_each_for_last_child = node.type === 'ElseBlock';
+            while ((parent = parent.parent) && (parent.type === 'EachBlock' || parent.type === 'IfBlock' || parent.type === 'ElseBlock' || parent.type === 'AwaitBlock')) {
+                const possible_siblings = get_possible_element_siblings(parent, adjacent_only);
+                add_to_map(possible_siblings, result);
+                if (parent.type === 'EachBlock') {
+                    // first child of each block can select the last child of each block as previous sibling
+                    if (skip_each_for_last_child) {
+                        skip_each_for_last_child = false;
+                    }
+                    else {
+                        add_to_map(get_possible_last_child(parent, adjacent_only), result);
+                    }
+                }
+                else if (parent.type === 'ElseBlock') {
+                    skip_each_for_last_child = true;
+                    parent = parent.parent;
+                }
+                if (adjacent_only && has_definite_elements(possible_siblings)) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+    function get_possible_last_child(block, adjacent_only) {
+        const result = new Map();
+        if (block.type === 'EachBlock') {
+            const each_result = loop_child(block.children, adjacent_only);
+            const else_result = block.else ? loop_child(block.else.children, adjacent_only) : new Map();
+            const not_exhaustive = !has_definite_elements(else_result);
+            if (not_exhaustive) {
+                mark_as_probably(each_result);
+                mark_as_probably(else_result);
+            }
+            add_to_map(each_result, result);
+            add_to_map(else_result, result);
+        }
+        else if (block.type === 'IfBlock') {
+            const if_result = loop_child(block.children, adjacent_only);
+            const else_result = block.else ? loop_child(block.else.children, adjacent_only) : new Map();
+            const not_exhaustive = !has_definite_elements(if_result) || !has_definite_elements(else_result);
+            if (not_exhaustive) {
+                mark_as_probably(if_result);
+                mark_as_probably(else_result);
+            }
+            add_to_map(if_result, result);
+            add_to_map(else_result, result);
+        }
+        else if (block.type === 'AwaitBlock') {
+            const pending_result = block.pending ? loop_child(block.pending.children, adjacent_only) : new Map();
+            const then_result = block.then ? loop_child(block.then.children, adjacent_only) : new Map();
+            const catch_result = block.catch ? loop_child(block.catch.children, adjacent_only) : new Map();
+            const not_exhaustive = !has_definite_elements(pending_result) || !has_definite_elements(then_result) || !has_definite_elements(catch_result);
+            if (not_exhaustive) {
+                mark_as_probably(pending_result);
+                mark_as_probably(then_result);
+                mark_as_probably(catch_result);
+            }
+            add_to_map(pending_result, result);
+            add_to_map(then_result, result);
+            add_to_map(catch_result, result);
+        }
+        return result;
+    }
+    function has_definite_elements(result) {
+        if (result.size === 0)
+            return false;
+        for (const exist of result.values()) {
+            if (exist === NodeExist.Definitely) {
+                return true;
+            }
+        }
+        return false;
+    }
+    function add_to_map(from, to) {
+        from.forEach((exist, element) => {
+            to.set(element, higher_existence(exist, to.get(element)));
+        });
+    }
+    function higher_existence(exist1, exist2) {
+        if (exist1 === undefined || exist2 === undefined)
+            return exist1 || exist2;
+        return exist1 > exist2 ? exist1 : exist2;
+    }
+    function mark_as_probably(result) {
+        for (const key of result.keys()) {
+            result.set(key, NodeExist.Probably);
+        }
+    }
+    function loop_child(children, adjacent_only) {
+        const result = new Map();
+        for (let i = children.length - 1; i >= 0; i--) {
+            const child = children[i];
+            if (child.type === 'Element') {
+                result.set(child, NodeExist.Definitely);
+                if (adjacent_only) {
+                    break;
+                }
+            }
+            else if (child.type === 'EachBlock' || child.type === 'IfBlock' || child.type === 'AwaitBlock') {
+                const child_result = get_possible_last_child(child, adjacent_only);
+                add_to_map(child_result, result);
+                if (adjacent_only && has_definite_elements(child_result)) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+    class Block$2 {
+        constructor(combinator) {
+            this.combinator = combinator;
+            this.host = false;
+            this.root = false;
+            this.selectors = [];
+            this.start = null;
+            this.end = null;
+            this.should_encapsulate = false;
+        }
+        add(selector) {
+            if (this.selectors.length === 0) {
+                this.start = selector.start;
+                this.host = selector.type === 'PseudoClassSelector' && selector.name === 'host';
+            }
+            this.root = this.root || selector.type === 'PseudoClassSelector' && selector.name === 'root';
+            this.selectors.push(selector);
+            this.end = selector.end;
+        }
+        get global() {
+            return (this.selectors.length >= 1 &&
+                this.selectors[0].type === 'PseudoClassSelector' &&
+                this.selectors[0].name === 'global' &&
+                this.selectors.every((selector) => selector.type === 'PseudoClassSelector' || selector.type === 'PseudoElementSelector'));
+        }
+    }
+    function group_selectors(selector) {
+        let block = new Block$2(null);
+        const blocks = [block];
+        selector.children.forEach((child) => {
+            if (child.type === 'WhiteSpace' || child.type === 'Combinator') {
+                block = new Block$2(child);
+                blocks.push(block);
+            }
+            else {
+                block.add(child);
+            }
+        });
+        return blocks;
+    }
 
-    typeof process !== 'undefined' && process.env.TEST;
+    function remove_css_prefix(name) {
+        return name.replace(/^-((webkit)|(moz)|(o)|(ms))-/, '');
+    }
+    const is_keyframes_node = (node) => remove_css_prefix(node.name) === 'keyframes';
+    const at_rule_has_declaration = ({ block }) => block &&
+        block.children &&
+        block.children.find((node) => node.type === 'Declaration');
+    function minify_declarations(code, start, declarations) {
+        let c = start;
+        declarations.forEach((declaration, i) => {
+            const separator = i > 0 ? ';' : '';
+            if ((declaration.node.start - c) > separator.length) {
+                code.overwrite(c, declaration.node.start, separator);
+            }
+            declaration.minify(code);
+            c = declaration.node.end;
+        });
+        return c;
+    }
+    class Rule$1 {
+        constructor(node, stylesheet, parent) {
+            this.node = node;
+            this.parent = parent;
+            this.selectors = node.prelude.children.map((node) => new Selector$1(node, stylesheet));
+            this.declarations = node.block.children.map((node) => new Declaration$1(node));
+        }
+        apply(node) {
+            this.selectors.forEach(selector => selector.apply(node)); // TODO move the logic in here?
+        }
+        is_used(dev) {
+            if (this.parent && this.parent.node.type === 'Atrule' && is_keyframes_node(this.parent.node))
+                return true;
+            if (this.declarations.length === 0)
+                return dev;
+            return this.selectors.some(s => s.used);
+        }
+        minify(code, _dev) {
+            let c = this.node.start;
+            let started = false;
+            this.selectors.forEach((selector) => {
+                if (selector.used) {
+                    const separator = started ? ',' : '';
+                    if ((selector.node.start - c) > separator.length) {
+                        code.overwrite(c, selector.node.start, separator);
+                    }
+                    selector.minify(code);
+                    c = selector.node.end;
+                    started = true;
+                }
+            });
+            code.remove(c, this.node.block.start);
+            c = this.node.block.start + 1;
+            c = minify_declarations(code, c, this.declarations);
+            code.remove(c, this.node.block.end - 1);
+        }
+        transform(code, id, keyframes, max_amount_class_specificity_increased) {
+            if (this.parent && this.parent.node.type === 'Atrule' && is_keyframes_node(this.parent.node))
+                return true;
+            const attr = `.${id}`;
+            this.selectors.forEach(selector => selector.transform(code, attr, max_amount_class_specificity_increased));
+            this.declarations.forEach(declaration => declaration.transform(code, keyframes));
+        }
+        validate(component) {
+            this.selectors.forEach(selector => {
+                selector.validate(component);
+            });
+        }
+        warn_on_unused_selector(handler) {
+            this.selectors.forEach(selector => {
+                if (!selector.used)
+                    handler(selector);
+            });
+        }
+        get_max_amount_class_specificity_increased() {
+            return Math.max(...this.selectors.map(selector => selector.get_amount_class_specificity_increased()));
+        }
+    }
+    class Declaration$1 {
+        constructor(node) {
+            this.node = node;
+        }
+        transform(code, keyframes) {
+            const property = this.node.property && remove_css_prefix(this.node.property.toLowerCase());
+            if (property === 'animation' || property === 'animation-name') {
+                this.node.value.children.forEach((block) => {
+                    if (block.type === 'Identifier') {
+                        const name = block.name;
+                        if (keyframes.has(name)) {
+                            code.overwrite(block.start, block.end, keyframes.get(name));
+                        }
+                    }
+                });
+            }
+        }
+        minify(code) {
+            if (!this.node.property)
+                return; // @apply, and possibly other weird cases?
+            const c = this.node.start + this.node.property.length;
+            const first = this.node.value.children
+                ? this.node.value.children[0]
+                : this.node.value;
+            // Don't minify whitespace in custom properties, since some browsers (Chromium < 99)
+            // treat --foo: ; and --foo:; differently
+            if (first.type === 'Raw' && /^\s+$/.test(first.value))
+                return;
+            let start = first.start;
+            while (/\s/.test(code.original[start]))
+                start += 1;
+            if (start - c > 1) {
+                code.overwrite(c, start, ':');
+            }
+        }
+    }
+    class Atrule$1 {
+        constructor(node) {
+            this.node = node;
+            this.children = [];
+            this.declarations = [];
+        }
+        apply(node) {
+            if (this.node.name === 'media' || this.node.name === 'supports') {
+                this.children.forEach(child => {
+                    child.apply(node);
+                });
+            }
+            else if (is_keyframes_node(this.node)) {
+                this.children.forEach((rule) => {
+                    rule.selectors.forEach(selector => {
+                        selector.used = true;
+                    });
+                });
+            }
+        }
+        is_used(_dev) {
+            return true; // TODO
+        }
+        minify(code, dev) {
+            if (this.node.name === 'media') {
+                const expression_char = code.original[this.node.prelude.start];
+                let c = this.node.start + (expression_char === '(' ? 6 : 7);
+                if (this.node.prelude.start > c)
+                    code.remove(c, this.node.prelude.start);
+                this.node.prelude.children.forEach((query) => {
+                    // TODO minify queries
+                    c = query.end;
+                });
+                code.remove(c, this.node.block.start);
+            }
+            else if (this.node.name === 'supports') {
+                let c = this.node.start + 9;
+                if (this.node.prelude.start - c > 1)
+                    code.overwrite(c, this.node.prelude.start, ' ');
+                this.node.prelude.children.forEach((query) => {
+                    // TODO minify queries
+                    c = query.end;
+                });
+                code.remove(c, this.node.block.start);
+            }
+            else {
+                let c = this.node.start + this.node.name.length + 1;
+                if (this.node.prelude) {
+                    if (this.node.prelude.start - c > 1)
+                        code.overwrite(c, this.node.prelude.start, ' ');
+                    c = this.node.prelude.end;
+                }
+                if (this.node.block && this.node.block.start - c > 0) {
+                    code.remove(c, this.node.block.start);
+                }
+            }
+            // TODO other atrules
+            if (this.node.block) {
+                let c = this.node.block.start + 1;
+                if (this.declarations.length) {
+                    c = minify_declarations(code, c, this.declarations);
+                    // if the atrule has children, leave the last declaration semicolon alone
+                    if (this.children.length)
+                        c++;
+                }
+                this.children.forEach(child => {
+                    if (child.is_used(dev)) {
+                        code.remove(c, child.node.start);
+                        child.minify(code, dev);
+                        c = child.node.end;
+                    }
+                });
+                code.remove(c, this.node.block.end - 1);
+            }
+        }
+        transform(code, id, keyframes, max_amount_class_specificity_increased) {
+            if (is_keyframes_node(this.node)) {
+                this.node.prelude.children.forEach(({ type, name, start, end }) => {
+                    if (type === 'Identifier') {
+                        if (name.startsWith('-global-')) {
+                            code.remove(start, start + 8);
+                            this.children.forEach((rule) => {
+                                rule.selectors.forEach(selector => {
+                                    selector.used = true;
+                                });
+                            });
+                        }
+                        else {
+                            code.overwrite(start, end, keyframes.get(name));
+                        }
+                    }
+                });
+            }
+            this.children.forEach(child => {
+                child.transform(code, id, keyframes, max_amount_class_specificity_increased);
+            });
+        }
+        validate(component) {
+            this.children.forEach(child => {
+                child.validate(component);
+            });
+        }
+        warn_on_unused_selector(handler) {
+            if (this.node.name !== 'media')
+                return;
+            this.children.forEach(child => {
+                child.warn_on_unused_selector(handler);
+            });
+        }
+        get_max_amount_class_specificity_increased() {
+            return Math.max(...this.children.map(rule => rule.get_max_amount_class_specificity_increased()));
+        }
+    }
+    const get_default_css_hash = ({ css, hash }) => {
+        return `svelte-${hash(css)}`;
+    };
+    class Stylesheet {
+        constructor({ source, ast, component_name, filename, dev, get_css_hash = get_default_css_hash }) {
+            this.children = [];
+            this.keyframes = new Map();
+            this.nodes_with_css_class = new Set();
+            this.source = source;
+            this.ast = ast;
+            this.filename = filename;
+            this.dev = dev;
+            if (ast.css && ast.css.children.length) {
+                this.id = get_css_hash({
+                    filename,
+                    name: component_name,
+                    css: ast.css.content.styles,
+                    hash
+                });
+                this.has_styles = true;
+                const stack = [];
+                let depth = 0;
+                let current_atrule = null;
+                walk(ast.css, {
+                    enter: (node) => {
+                        if (node.type === 'Atrule') {
+                            const atrule = new Atrule$1(node);
+                            stack.push(atrule);
+                            if (current_atrule) {
+                                current_atrule.children.push(atrule);
+                            }
+                            else if (depth <= 1) {
+                                this.children.push(atrule);
+                            }
+                            if (is_keyframes_node(node)) {
+                                node.prelude.children.forEach((expression) => {
+                                    if (expression.type === 'Identifier' && !expression.name.startsWith('-global-')) {
+                                        this.keyframes.set(expression.name, `${this.id}-${expression.name}`);
+                                    }
+                                });
+                            }
+                            else if (at_rule_has_declaration(node)) {
+                                const at_rule_declarations = node.block.children
+                                    .filter(node => node.type === 'Declaration')
+                                    .map(node => new Declaration$1(node));
+                                push_array$1(atrule.declarations, at_rule_declarations);
+                            }
+                            current_atrule = atrule;
+                        }
+                        if (node.type === 'Rule') {
+                            const rule = new Rule$1(node, this, current_atrule);
+                            if (current_atrule) {
+                                current_atrule.children.push(rule);
+                            }
+                            else if (depth <= 1) {
+                                this.children.push(rule);
+                            }
+                        }
+                        depth += 1;
+                    },
+                    leave: (node) => {
+                        if (node.type === 'Atrule') {
+                            stack.pop();
+                            current_atrule = stack[stack.length - 1];
+                        }
+                        depth -= 1;
+                    }
+                });
+            }
+            else {
+                this.has_styles = false;
+            }
+        }
+        apply(node) {
+            if (!this.has_styles)
+                return;
+            for (let i = 0; i < this.children.length; i += 1) {
+                const child = this.children[i];
+                child.apply(node);
+            }
+        }
+        reify() {
+            this.nodes_with_css_class.forEach((node) => {
+                node.add_css_class();
+            });
+        }
+        render(file, should_transform_selectors) {
+            if (!this.has_styles) {
+                return { code: null, map: null };
+            }
+            const code = new MagicString(this.source);
+            walk(this.ast.css, {
+                enter: (node) => {
+                    code.addSourcemapLocation(node.start);
+                    code.addSourcemapLocation(node.end);
+                }
+            });
+            if (should_transform_selectors) {
+                const max = Math.max(...this.children.map(rule => rule.get_max_amount_class_specificity_increased()));
+                this.children.forEach((child) => {
+                    child.transform(code, this.id, this.keyframes, max);
+                });
+            }
+            let c = 0;
+            this.children.forEach(child => {
+                if (child.is_used(this.dev)) {
+                    code.remove(c, child.node.start);
+                    child.minify(code, this.dev);
+                    c = child.node.end;
+                }
+            });
+            code.remove(c, this.source.length);
+            return {
+                code: code.toString(),
+                map: code.generateMap({
+                    includeContent: true,
+                    source: this.filename,
+                    file
+                })
+            };
+        }
+        validate(component) {
+            this.children.forEach(child => {
+                child.validate(component);
+            });
+        }
+        warn_on_unused_selectors(component) {
+            const ignores = !this.ast.css ? [] : extract_ignores_above_position(this.ast.css.start, this.ast.html.children);
+            component.push_ignores(ignores);
+            this.children.forEach(child => {
+                child.warn_on_unused_selector((selector) => {
+                    component.warn(selector.node, compiler_warnings.css_unused_selector(this.source.slice(selector.node.start, selector.node.end)));
+                });
+            });
+            component.pop_ignores();
+        }
+    }
+
+    const test = typeof process !== 'undefined' && process.env.TEST;
+
+    class TemplateScope {
+        constructor(parent) {
+            this.owners = new Map();
+            this.parent = parent;
+            this.names = new Set(parent ? parent.names : []);
+            this.dependencies_for_name = new Map(parent ? parent.dependencies_for_name : []);
+        }
+        add(name, dependencies, owner) {
+            this.names.add(name);
+            this.dependencies_for_name.set(name, dependencies);
+            this.owners.set(name, owner);
+            return this;
+        }
+        child() {
+            const child = new TemplateScope(this);
+            return child;
+        }
+        is_top_level(name) {
+            return !this.parent || !this.names.has(name) && this.parent.is_top_level(name);
+        }
+        get_owner(name) {
+            return this.owners.get(name) || (this.parent && this.parent.get_owner(name));
+        }
+        is_let(name) {
+            const owner = this.get_owner(name);
+            return owner && (owner.type === 'Element' || owner.type === 'InlineComponent' || owner.type === 'SlotTemplate');
+        }
+        is_await(name) {
+            const owner = this.get_owner(name);
+            return owner && (owner.type === 'ThenBlock' || owner.type === 'CatchBlock');
+        }
+        is_const(name) {
+            const owner = this.get_owner(name);
+            return owner && owner.type === 'ConstTag';
+        }
+    }
+
+    class Fragment extends Node$1 {
+        constructor(component, info) {
+            const scope = new TemplateScope();
+            super(component, null, scope, info);
+            this.scope = scope;
+            this.children = map_children(component, this, scope, info.children);
+        }
+    }
+
+    // This file is automatically generated
+    var internal_exports = new Set(["HtmlTag", "HtmlTagHydration", "SvelteComponent", "SvelteComponentDev", "SvelteComponentTyped", "SvelteElement", "action_destroyer", "add_attribute", "add_classes", "add_flush_callback", "add_location", "add_render_callback", "add_resize_listener", "add_styles", "add_transform", "afterUpdate", "append", "append_dev", "append_empty_stylesheet", "append_hydration", "append_hydration_dev", "append_styles", "assign", "attr", "attr_dev", "attribute_to_object", "beforeUpdate", "bind", "binding_callbacks", "blank_object", "bubble", "check_outros", "children", "claim_component", "claim_element", "claim_html_tag", "claim_space", "claim_svg_element", "claim_text", "clear_loops", "component_subscribe", "compute_rest_props", "compute_slots", "createEventDispatcher", "create_animation", "create_bidirectional_transition", "create_component", "create_in_transition", "create_out_transition", "create_slot", "create_ssr_component", "current_component", "custom_event", "dataset_dev", "debug", "destroy_block", "destroy_component", "destroy_each", "detach", "detach_after_dev", "detach_before_dev", "detach_between_dev", "detach_dev", "dirty_components", "dispatch_dev", "each", "element", "element_is", "empty", "end_hydrating", "escape", "escape_attribute_value", "escape_object", "escaped", "exclude_internal_props", "fix_and_destroy_block", "fix_and_outro_and_destroy_block", "fix_position", "flush", "getAllContexts", "getContext", "get_all_dirty_from_scope", "get_binding_group_value", "get_current_component", "get_custom_elements_slots", "get_root_for_style", "get_slot_changes", "get_spread_object", "get_spread_update", "get_store_value", "globals", "group_outros", "handle_promise", "hasContext", "has_prop", "identity", "init", "insert", "insert_dev", "insert_hydration", "insert_hydration_dev", "intros", "invalid_attribute_name_character", "is_client", "is_crossorigin", "is_empty", "is_function", "is_promise", "is_void", "listen", "listen_dev", "loop", "loop_guard", "merge_ssr_styles", "missing_component", "mount_component", "noop", "not_equal", "now", "null_to_empty", "object_without_properties", "onDestroy", "onMount", "once", "outro_and_destroy_block", "prevent_default", "prop_dev", "query_selector_all", "raf", "run", "run_all", "safe_not_equal", "schedule_update", "select_multiple_value", "select_option", "select_options", "select_value", "self", "setContext", "set_attributes", "set_current_component", "set_custom_element_data", "set_data", "set_data_dev", "set_input_type", "set_input_value", "set_now", "set_raf", "set_store_value", "set_style", "set_svg_attributes", "space", "spread", "src_url_equal", "start_hydrating", "stop_propagation", "subscribe", "svg_element", "text", "tick", "time_ranges_to_array", "to_number", "toggle_class", "transition_in", "transition_out", "trusted", "update_await_block_branch", "update_keyed_each", "update_slot", "update_slot_base", "validate_component", "validate_dynamic_element", "validate_each_argument", "validate_each_keys", "validate_slots", "validate_store", "validate_void_dynamic_element", "xlink_attr"]);
+
+    function is_used_as_reference(node, parent) {
+        if (!is_reference(node, parent)) {
+            return false;
+        }
+        if (!parent) {
+            return true;
+        }
+        /* eslint-disable no-fallthrough */
+        switch (parent.type) {
+            // disregard the `foo` in `const foo = bar`
+            case 'VariableDeclarator':
+                return node !== parent.id;
+            // disregard the `foo`, `bar` in `function foo(bar){}`
+            case 'FunctionDeclaration':
+            // disregard the `foo` in `import { foo } from 'foo'`
+            case 'ImportSpecifier':
+            // disregard the `foo` in `import foo from 'foo'`
+            case 'ImportDefaultSpecifier':
+            // disregard the `foo` in `import * as foo from 'foo'`
+            case 'ImportNamespaceSpecifier':
+            // disregard the `foo` in `export { foo }`
+            case 'ExportSpecifier':
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    class Component {
+        constructor(ast, source, name, compile_options, stats, warnings) {
+            this.ignore_stack = [];
+            this.vars = [];
+            this.var_lookup = new Map();
+            this.imports = [];
+            this.exports_from = [];
+            this.instance_exports_from = [];
+            this.hoistable_nodes = new Set();
+            this.node_for_declaration = new Map();
+            this.partly_hoisted = [];
+            this.fully_hoisted = [];
+            this.reactive_declarations = [];
+            this.reactive_declaration_nodes = new Set();
+            this.has_reactive_assignments = false;
+            this.injected_reactive_declaration_vars = new Set();
+            this.helpers = new Map();
+            this.globals = new Map();
+            this.indirect_dependencies = new Map();
+            this.elements = [];
+            this.aliases = new Map();
+            this.used_names = new Set();
+            this.globally_used_names = new Set();
+            this.slots = new Map();
+            this.slot_outlets = new Set();
+            this.name = { type: 'Identifier', name };
+            this.stats = stats;
+            this.warnings = warnings;
+            this.ast = ast;
+            this.source = source;
+            this.compile_options = compile_options;
+            // the instance JS gets mutated, so we park
+            // a copy here for later. TODO this feels gross
+            this.original_ast = clone({
+                html: ast.html,
+                css: ast.css,
+                instance: ast.instance,
+                module: ast.module
+            });
+            this.file =
+                compile_options.filename &&
+                    (typeof process !== 'undefined'
+                        ? compile_options.filename
+                            .replace(process.cwd(), '')
+                            .replace(/^[/\\]/, '')
+                        : compile_options.filename);
+            this.locate = getLocator(this.source, { offsetLine: 1 });
+            // styles
+            this.stylesheet = new Stylesheet({
+                source,
+                ast,
+                filename: compile_options.filename,
+                component_name: name,
+                dev: compile_options.dev,
+                get_css_hash: compile_options.cssHash
+            });
+            this.stylesheet.validate(this);
+            this.component_options = process_component_options(this, this.ast.html.children);
+            this.namespace =
+                namespaces[this.component_options.namespace] ||
+                    this.component_options.namespace;
+            if (compile_options.customElement) {
+                if (this.component_options.tag === undefined &&
+                    compile_options.tag === undefined) {
+                    const svelteOptions = ast.html.children.find(child => child.name === 'svelte:options') || { start: 0, end: 0 };
+                    this.warn(svelteOptions, compiler_warnings.custom_element_no_tag);
+                }
+                this.tag = this.component_options.tag || compile_options.tag;
+            }
+            else {
+                this.tag = this.name.name;
+            }
+            this.walk_module_js();
+            this.push_ignores(this.ast.instance ? extract_ignores_above_position(this.ast.instance.start, this.ast.html.children) : []);
+            this.walk_instance_js_pre_template();
+            this.pop_ignores();
+            this.fragment = new Fragment(this, ast.html);
+            this.name = this.get_unique_name(name);
+            this.push_ignores(this.ast.instance ? extract_ignores_above_position(this.ast.instance.start, this.ast.html.children) : []);
+            this.walk_instance_js_post_template();
+            this.pop_ignores();
+            this.elements.forEach(element => this.stylesheet.apply(element));
+            if (!compile_options.customElement)
+                this.stylesheet.reify();
+            this.stylesheet.warn_on_unused_selectors(this);
+        }
+        add_var(node, variable, add_to_lookup = true) {
+            this.vars.push(variable);
+            if (add_to_lookup) {
+                if (this.var_lookup.has(variable.name)) {
+                    const exists_var = this.var_lookup.get(variable.name);
+                    if (exists_var.module && exists_var.imported) {
+                        this.error(node, compiler_errors.illegal_variable_declaration);
+                    }
+                }
+                this.var_lookup.set(variable.name, variable);
+            }
+        }
+        add_reference(node, name) {
+            const variable = this.var_lookup.get(name);
+            if (variable) {
+                variable.referenced = true;
+            }
+            else if (is_reserved_keyword(name)) {
+                this.add_var(node, {
+                    name,
+                    injected: true,
+                    referenced: true
+                });
+            }
+            else if (name[0] === '$') {
+                this.add_var(node, {
+                    name,
+                    injected: true,
+                    referenced: true,
+                    mutated: true,
+                    writable: true
+                });
+                const subscribable_name = name.slice(1);
+                const variable = this.var_lookup.get(subscribable_name);
+                if (variable) {
+                    variable.referenced = true;
+                    variable.subscribable = true;
+                }
+            }
+            else {
+                if (this.compile_options.varsReport === 'full') {
+                    this.add_var(node, { name, referenced: true }, false);
+                }
+                this.used_names.add(name);
+            }
+        }
+        alias(name) {
+            if (!this.aliases.has(name)) {
+                this.aliases.set(name, this.get_unique_name(name));
+            }
+            return this.aliases.get(name);
+        }
+        apply_stylesheet(element) {
+            this.elements.push(element);
+        }
+        global(name) {
+            const alias = this.alias(name);
+            this.globals.set(name, alias);
+            return alias;
+        }
+        generate(result) {
+            let js = null;
+            let css = null;
+            if (result) {
+                const { compile_options, name } = this;
+                const { format = 'esm' } = compile_options;
+                const banner = `${this.file ? `${this.file} ` : ''}generated by Svelte v${'3.48.0'}`;
+                const program = { type: 'Program', body: result.js };
+                walk(program, {
+                    enter: (node, parent, key) => {
+                        if (node.type === 'Identifier') {
+                            if (node.name[0] === '@') {
+                                if (node.name[1] === '_') {
+                                    const alias = this.global(node.name.slice(2));
+                                    node.name = alias.name;
+                                }
+                                else {
+                                    let name = node.name.slice(1);
+                                    if (compile_options.hydratable) {
+                                        if (internal_exports.has(`${name}_hydration`)) {
+                                            name += '_hydration';
+                                        }
+                                        else if (internal_exports.has(`${name}Hydration`)) {
+                                            name += 'Hydration';
+                                        }
+                                    }
+                                    if (compile_options.dev) {
+                                        if (internal_exports.has(`${name}_dev`)) {
+                                            name += '_dev';
+                                        }
+                                        else if (internal_exports.has(`${name}Dev`)) {
+                                            name += 'Dev';
+                                        }
+                                    }
+                                    const alias = this.alias(name);
+                                    this.helpers.set(name, alias);
+                                    node.name = alias.name;
+                                }
+                            }
+                            else if (node.name[0] !== '#' && !is_valid(node.name)) {
+                                // this hack allows x`foo.${bar}` where bar could be invalid
+                                const literal = { type: 'Literal', value: node.name };
+                                if (parent.type === 'Property' && key === 'key') {
+                                    parent.key = literal;
+                                }
+                                else if (parent.type === 'MemberExpression' && key === 'property') {
+                                    parent.property = literal;
+                                    parent.computed = true;
+                                }
+                            }
+                        }
+                    }
+                });
+                const referenced_globals = Array.from(this.globals, ([name, alias]) => name !== alias.name && { name, alias }).filter(Boolean);
+                if (referenced_globals.length) {
+                    this.helpers.set('globals', this.alias('globals'));
+                }
+                const imported_helpers = Array.from(this.helpers, ([name, alias]) => ({
+                    name,
+                    alias
+                }));
+                create_module(program, format, name, banner, compile_options.sveltePath, imported_helpers, referenced_globals, this.imports, this.vars
+                    .filter(variable => variable.module && variable.export_name)
+                    .map(variable => ({
+                    name: variable.name,
+                    as: variable.export_name
+                })), this.exports_from);
+                css = compile_options.customElement
+                    ? { code: null, map: null }
+                    : result.css;
+                const js_sourcemap_enabled = check_enable_sourcemap(compile_options.enableSourcemap, 'js');
+                if (!js_sourcemap_enabled) {
+                    js = print(program);
+                    js.map = null;
+                }
+                else {
+                    const sourcemap_source_filename = get_sourcemap_source_filename(compile_options);
+                    js = print(program, {
+                        sourceMapSource: sourcemap_source_filename
+                    });
+                    js.map.sources = [
+                        sourcemap_source_filename
+                    ];
+                    js.map.sourcesContent = [
+                        this.source
+                    ];
+                    js.map = apply_preprocessor_sourcemap(sourcemap_source_filename, js.map, compile_options.sourcemap);
+                }
+            }
+            return {
+                js,
+                css,
+                ast: this.original_ast,
+                warnings: this.warnings,
+                vars: this.get_vars_report(),
+                stats: this.stats.render()
+            };
+        }
+        get_unique_name(name, scope) {
+            if (test)
+                name = `${name}$`;
+            let alias = name;
+            for (let i = 1; reserved.has(alias) ||
+                this.var_lookup.has(alias) ||
+                this.used_names.has(alias) ||
+                this.globally_used_names.has(alias) ||
+                (scope && scope.has(alias)); alias = `${name}_${i++}`)
+                ;
+            this.used_names.add(alias);
+            return { type: 'Identifier', name: alias };
+        }
+        get_unique_name_maker() {
+            const local_used_names = new Set();
+            function add(name) {
+                local_used_names.add(name);
+            }
+            reserved.forEach(add);
+            internal_exports.forEach(add);
+            this.var_lookup.forEach((_value, key) => add(key));
+            return (name) => {
+                if (test)
+                    name = `${name}$`;
+                let alias = name;
+                for (let i = 1; this.used_names.has(alias) || local_used_names.has(alias); alias = `${name}_${i++}`)
+                    ;
+                local_used_names.add(alias);
+                this.globally_used_names.add(alias);
+                return {
+                    type: 'Identifier',
+                    name: alias
+                };
+            };
+        }
+        get_vars_report() {
+            const { compile_options, vars } = this;
+            const vars_report = compile_options.varsReport === false
+                ? []
+                : compile_options.varsReport === 'full'
+                    ? vars
+                    : vars.filter(v => !v.global && !v.internal);
+            return vars_report.map(v => ({
+                name: v.name,
+                export_name: v.export_name || null,
+                injected: v.injected || false,
+                module: v.module || false,
+                mutated: v.mutated || false,
+                reassigned: v.reassigned || false,
+                referenced: v.referenced || false,
+                writable: v.writable || false,
+                referenced_from_script: v.referenced_from_script || false
+            }));
+        }
+        error(pos, e) {
+            if (this.compile_options.errorMode === 'warn') {
+                this.warn(pos, e);
+            }
+            else {
+                error(e.message, {
+                    name: 'ValidationError',
+                    code: e.code,
+                    source: this.source,
+                    start: pos.start,
+                    end: pos.end,
+                    filename: this.compile_options.filename
+                });
+            }
+        }
+        warn(pos, warning) {
+            if (this.ignores && this.ignores.has(warning.code)) {
+                return;
+            }
+            const start = this.locate(pos.start);
+            const end = this.locate(pos.end);
+            const frame = get_code_frame(this.source, start.line - 1, start.column);
+            this.warnings.push({
+                code: warning.code,
+                message: warning.message,
+                frame,
+                start,
+                end,
+                pos: pos.start,
+                filename: this.compile_options.filename,
+                toString: () => `${warning.message} (${start.line}:${start.column})\n${frame}`
+            });
+        }
+        extract_imports(node) {
+            this.imports.push(node);
+        }
+        extract_exports(node, module_script = false) {
+            const ignores = extract_svelte_ignore_from_comments(node);
+            if (ignores.length)
+                this.push_ignores(ignores);
+            const result = this._extract_exports(node, module_script);
+            if (ignores.length)
+                this.pop_ignores();
+            return result;
+        }
+        _extract_exports(node, module_script) {
+            if (node.type === 'ExportDefaultDeclaration') {
+                return this.error(node, compiler_errors.default_export);
+            }
+            if (node.type === 'ExportNamedDeclaration') {
+                if (node.source) {
+                    if (module_script) {
+                        this.exports_from.push(node);
+                    }
+                    else {
+                        this.instance_exports_from.push(node);
+                    }
+                    return null;
+                }
+                if (node.declaration) {
+                    if (node.declaration.type === 'VariableDeclaration') {
+                        node.declaration.declarations.forEach(declarator => {
+                            extract_names(declarator.id).forEach(name => {
+                                const variable = this.var_lookup.get(name);
+                                variable.export_name = name;
+                                if (!module_script && variable.writable && !(variable.referenced || variable.referenced_from_script || variable.subscribable)) {
+                                    this.warn(declarator, compiler_warnings.unused_export_let(this.name.name, name));
+                                }
+                            });
+                        });
+                    }
+                    else {
+                        const { name } = node.declaration.id;
+                        const variable = this.var_lookup.get(name);
+                        variable.export_name = name;
+                    }
+                    return node.declaration;
+                }
+                else {
+                    node.specifiers.forEach(specifier => {
+                        const variable = this.var_lookup.get(specifier.local.name);
+                        if (variable) {
+                            variable.export_name = specifier.exported.name;
+                            if (!module_script && variable.writable && !(variable.referenced || variable.referenced_from_script || variable.subscribable)) {
+                                this.warn(specifier, compiler_warnings.unused_export_let(this.name.name, specifier.exported.name));
+                            }
+                        }
+                    });
+                    return null;
+                }
+            }
+        }
+        extract_javascript(script) {
+            if (!script)
+                return null;
+            return script.content.body.filter(node => {
+                if (!node)
+                    return false;
+                if (this.hoistable_nodes.has(node))
+                    return false;
+                if (this.reactive_declaration_nodes.has(node))
+                    return false;
+                if (node.type === 'ImportDeclaration')
+                    return false;
+                if (node.type === 'ExportDeclaration' && node.specifiers.length > 0)
+                    return false;
+                return true;
+            });
+        }
+        walk_module_js() {
+            const component = this;
+            const script = this.ast.module;
+            if (!script)
+                return;
+            walk(script.content, {
+                enter(node) {
+                    if (node.type === 'LabeledStatement' && node.label.name === '$') {
+                        component.warn(node, compiler_warnings.module_script_reactive_declaration);
+                    }
+                }
+            });
+            const { scope, globals } = create_scopes(script.content);
+            this.module_scope = scope;
+            scope.declarations.forEach((node, name) => {
+                if (name[0] === '$') {
+                    return this.error(node, compiler_errors.illegal_declaration);
+                }
+                const writable = node.type === 'VariableDeclaration' && (node.kind === 'var' || node.kind === 'let');
+                const imported = node.type.startsWith('Import');
+                this.add_var(node, {
+                    name,
+                    module: true,
+                    hoistable: true,
+                    writable,
+                    imported
+                });
+            });
+            globals.forEach((node, name) => {
+                if (name[0] === '$') {
+                    return this.error(node, compiler_errors.illegal_subscription);
+                }
+                else {
+                    this.add_var(node, {
+                        name,
+                        global: true,
+                        hoistable: true
+                    });
+                }
+            });
+            const { body } = script.content;
+            let i = body.length;
+            while (--i >= 0) {
+                const node = body[i];
+                if (node.type === 'ImportDeclaration') {
+                    this.extract_imports(node);
+                    body.splice(i, 1);
+                }
+                if (/^Export/.test(node.type)) {
+                    const replacement = this.extract_exports(node, true);
+                    if (replacement) {
+                        body[i] = replacement;
+                    }
+                    else {
+                        body.splice(i, 1);
+                    }
+                }
+            }
+        }
+        walk_instance_js_pre_template() {
+            const script = this.ast.instance;
+            if (!script)
+                return;
+            // inject vars for reactive declarations
+            script.content.body.forEach(node => {
+                if (node.type !== 'LabeledStatement')
+                    return;
+                if (node.body.type !== 'ExpressionStatement')
+                    return;
+                const { expression } = node.body;
+                if (expression.type !== 'AssignmentExpression')
+                    return;
+                if (expression.left.type === 'MemberExpression')
+                    return;
+                extract_names(expression.left).forEach(name => {
+                    if (!this.var_lookup.has(name) && name[0] !== '$') {
+                        this.injected_reactive_declaration_vars.add(name);
+                    }
+                });
+            });
+            const { scope: instance_scope, map, globals } = create_scopes(script.content);
+            this.instance_scope = instance_scope;
+            this.instance_scope_map = map;
+            instance_scope.declarations.forEach((node, name) => {
+                if (name[0] === '$') {
+                    return this.error(node, compiler_errors.illegal_declaration);
+                }
+                const writable = node.type === 'VariableDeclaration' && (node.kind === 'var' || node.kind === 'let');
+                const imported = node.type.startsWith('Import');
+                this.add_var(node, {
+                    name,
+                    initialised: instance_scope.initialised_declarations.has(name),
+                    writable,
+                    imported
+                });
+                this.node_for_declaration.set(name, node);
+            });
+            // NOTE: add store variable first, then only $store value
+            // as `$store` will mark `store` variable as referenced and subscribable
+            const global_keys = Array.from(globals.keys());
+            const sorted_globals = [
+                ...global_keys.filter(key => key[0] !== '$'),
+                ...global_keys.filter(key => key[0] === '$')
+            ];
+            sorted_globals.forEach(name => {
+                if (this.var_lookup.has(name))
+                    return;
+                const node = globals.get(name);
+                if (this.injected_reactive_declaration_vars.has(name)) {
+                    this.add_var(node, {
+                        name,
+                        injected: true,
+                        writable: true,
+                        reassigned: true,
+                        initialised: true
+                    });
+                }
+                else if (is_reserved_keyword(name)) {
+                    this.add_var(node, {
+                        name,
+                        injected: true
+                    });
+                }
+                else if (name[0] === '$') {
+                    if (name === '$' || name[1] === '$') {
+                        return this.error(node, compiler_errors.illegal_global(name));
+                    }
+                    this.add_var(node, {
+                        name,
+                        injected: true,
+                        mutated: true,
+                        writable: true
+                    });
+                    this.add_reference(node, name.slice(1));
+                    const variable = this.var_lookup.get(name.slice(1));
+                    if (variable) {
+                        variable.subscribable = true;
+                        variable.referenced_from_script = true;
+                    }
+                }
+                else {
+                    this.add_var(node, {
+                        name,
+                        global: true,
+                        hoistable: true
+                    });
+                }
+            });
+            this.track_references_and_mutations();
+        }
+        walk_instance_js_post_template() {
+            const script = this.ast.instance;
+            if (!script)
+                return;
+            this.post_template_walk();
+            this.hoist_instance_declarations();
+            this.extract_reactive_declarations();
+        }
+        post_template_walk() {
+            const script = this.ast.instance;
+            if (!script)
+                return;
+            const component = this;
+            const { content } = script;
+            const { instance_scope, instance_scope_map: map } = this;
+            let scope = instance_scope;
+            const to_remove = [];
+            const remove = (parent, prop, index) => {
+                to_remove.unshift([parent, prop, index]);
+            };
+            let scope_updated = false;
+            const current_function_stack = [];
+            let current_function = null;
+            walk(content, {
+                enter(node, parent, prop, index) {
+                    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression')) {
+                        current_function_stack.push(current_function = node);
+                    }
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                    if (node.type === 'ImportDeclaration') {
+                        component.extract_imports(node);
+                        // TODO: to use actual remove
+                        remove(parent, prop, index);
+                        return this.skip();
+                    }
+                    if (/^Export/.test(node.type)) {
+                        const replacement = component.extract_exports(node);
+                        if (replacement) {
+                            this.replace(replacement);
+                        }
+                        else {
+                            // TODO: to use actual remove
+                            remove(parent, prop, index);
+                        }
+                        return this.skip();
+                    }
+                    component.warn_on_undefined_store_value_references(node, parent, prop, scope);
+                },
+                leave(node) {
+                    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression')) {
+                        current_function_stack.pop();
+                        current_function = current_function_stack[current_function_stack.length - 1];
+                    }
+                    // do it on leave, to prevent infinite loop
+                    if (component.compile_options.dev && component.compile_options.loopGuardTimeout > 0 && (!current_function || (!current_function.generator && !current_function.async))) {
+                        const to_replace_for_loop_protect = component.loop_protect(node, scope, component.compile_options.loopGuardTimeout);
+                        if (to_replace_for_loop_protect) {
+                            this.replace(to_replace_for_loop_protect);
+                            scope_updated = true;
+                        }
+                    }
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                }
+            });
+            for (const [parent, prop, index] of to_remove) {
+                if (parent) {
+                    if (index !== null) {
+                        parent[prop].splice(index, 1);
+                    }
+                    else {
+                        delete parent[prop];
+                    }
+                }
+            }
+            if (scope_updated) {
+                const { scope, map } = create_scopes(script.content);
+                this.instance_scope = scope;
+                this.instance_scope_map = map;
+            }
+        }
+        track_references_and_mutations() {
+            const script = this.ast.instance;
+            if (!script)
+                return;
+            const component = this;
+            const { content } = script;
+            const { instance_scope, module_scope, instance_scope_map: map } = this;
+            let scope = instance_scope;
+            walk(content, {
+                enter(node, parent) {
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+                        const assignee = node.type === 'AssignmentExpression' ? node.left : node.argument;
+                        const names = extract_names(assignee);
+                        const deep = assignee.type === 'MemberExpression';
+                        names.forEach(name => {
+                            const scope_owner = scope.find_owner(name);
+                            if (scope_owner !== null
+                                ? scope_owner === instance_scope
+                                : module_scope && module_scope.has(name)) {
+                                const variable = component.var_lookup.get(name);
+                                variable[deep ? 'mutated' : 'reassigned'] = true;
+                            }
+                        });
+                    }
+                    if (is_used_as_reference(node, parent)) {
+                        const object = get_object(node);
+                        if (scope.find_owner(object.name) === instance_scope) {
+                            const variable = component.var_lookup.get(object.name);
+                            variable.referenced_from_script = true;
+                        }
+                    }
+                },
+                leave(node) {
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                }
+            });
+        }
+        warn_on_undefined_store_value_references(node, parent, prop, scope) {
+            if (node.type === 'LabeledStatement' &&
+                node.label.name === '$' &&
+                parent.type !== 'Program') {
+                this.warn(node, compiler_warnings.non_top_level_reactive_declaration);
+            }
+            if (is_reference(node, parent)) {
+                const object = get_object(node);
+                const { name } = object;
+                if (name[0] === '$') {
+                    if (!scope.has(name)) {
+                        this.warn_if_undefined(name, object, null);
+                    }
+                    if (name[1] !== '$' && scope.has(name.slice(1)) && scope.find_owner(name.slice(1)) !== this.instance_scope) {
+                        if (!((/Function/.test(parent.type) && prop === 'params') || (parent.type === 'VariableDeclarator' && prop === 'id'))) {
+                            return this.error(node, compiler_errors.contextual_store);
+                        }
+                    }
+                }
+            }
+        }
+        loop_protect(node, scope, timeout) {
+            if (node.type === 'WhileStatement' ||
+                node.type === 'ForStatement' ||
+                node.type === 'DoWhileStatement') {
+                const guard = this.get_unique_name('guard', scope);
+                this.used_names.add(guard.name);
+                const before = b `const ${guard} = @loop_guard(${timeout})`;
+                const inside = b `${guard}();`;
+                // wrap expression statement with BlockStatement
+                if (node.body.type !== 'BlockStatement') {
+                    node.body = {
+                        type: 'BlockStatement',
+                        body: [node.body]
+                    };
+                }
+                node.body.body.push(inside[0]);
+                return {
+                    type: 'BlockStatement',
+                    body: [
+                        before[0],
+                        node
+                    ]
+                };
+            }
+            return null;
+        }
+        rewrite_props(get_insert) {
+            if (!this.ast.instance)
+                return;
+            const component = this;
+            const { instance_scope, instance_scope_map: map } = this;
+            let scope = instance_scope;
+            walk(this.ast.instance.content, {
+                enter(node) {
+                    if (/Function/.test(node.type)) {
+                        return this.skip();
+                    }
+                    if (map.has(node)) {
+                        scope = map.get(node);
+                    }
+                    if (node.type === 'ExportNamedDeclaration' && node.declaration) {
+                        return this.replace(node.declaration);
+                    }
+                    if (node.type === 'VariableDeclaration') {
+                        // NOTE: `var` does not follow block scoping
+                        if (node.kind === 'var' || scope === instance_scope) {
+                            const inserts = [];
+                            const props = [];
+                            function add_new_props(exported, local, default_value) {
+                                props.push({
+                                    type: 'Property',
+                                    method: false,
+                                    shorthand: false,
+                                    computed: false,
+                                    kind: 'init',
+                                    key: exported,
+                                    value: default_value
+                                        ? {
+                                            type: 'AssignmentPattern',
+                                            left: local,
+                                            right: default_value
+                                        }
+                                        : local
+                                });
+                            }
+                            // transform
+                            // ```
+                            // export let { x, y = 123 } = OBJ, z = 456
+                            // ```
+                            // into
+                            // ```
+                            // let { x: x$, y: y$ = 123 } = OBJ;
+                            // let { x = x$, y = y$, z = 456 } = $$props;
+                            // ```
+                            for (let index = 0; index < node.declarations.length; index++) {
+                                const declarator = node.declarations[index];
+                                if (declarator.id.type !== 'Identifier') {
+                                    function get_new_name(local) {
+                                        const variable = component.var_lookup.get(local.name);
+                                        if (variable.subscribable) {
+                                            inserts.push(get_insert(variable));
+                                        }
+                                        if (variable.export_name && variable.writable) {
+                                            const alias_name = component.get_unique_name(local.name);
+                                            add_new_props({ type: 'Identifier', name: variable.export_name }, local, alias_name);
+                                            return alias_name;
+                                        }
+                                        return local;
+                                    }
+                                    function rename_identifiers(param) {
+                                        switch (param.type) {
+                                            case 'ObjectPattern': {
+                                                const handle_prop = (prop) => {
+                                                    if (prop.type === 'RestElement') {
+                                                        rename_identifiers(prop);
+                                                    }
+                                                    else if (prop.value.type === 'Identifier') {
+                                                        prop.value = get_new_name(prop.value);
+                                                    }
+                                                    else {
+                                                        rename_identifiers(prop.value);
+                                                    }
+                                                };
+                                                param.properties.forEach(handle_prop);
+                                                break;
+                                            }
+                                            case 'ArrayPattern': {
+                                                const handle_element = (element, index, array) => {
+                                                    if (element) {
+                                                        if (element.type === 'Identifier') {
+                                                            array[index] = get_new_name(element);
+                                                        }
+                                                        else {
+                                                            rename_identifiers(element);
+                                                        }
+                                                    }
+                                                };
+                                                param.elements.forEach(handle_element);
+                                                break;
+                                            }
+                                            case 'RestElement':
+                                                param.argument = get_new_name(param.argument);
+                                                break;
+                                            case 'AssignmentPattern':
+                                                if (param.left.type === 'Identifier') {
+                                                    param.left = get_new_name(param.left);
+                                                }
+                                                else {
+                                                    rename_identifiers(param.left);
+                                                }
+                                                break;
+                                        }
+                                    }
+                                    rename_identifiers(declarator.id);
+                                }
+                                else {
+                                    const { name } = declarator.id;
+                                    const variable = component.var_lookup.get(name);
+                                    const is_props = variable.export_name && variable.writable;
+                                    if (is_props) {
+                                        add_new_props({ type: 'Identifier', name: variable.export_name }, declarator.id, declarator.init);
+                                        node.declarations.splice(index--, 1);
+                                    }
+                                    if (variable.subscribable && (is_props || declarator.init)) {
+                                        inserts.push(get_insert(variable));
+                                    }
+                                }
+                            }
+                            this.replace(b `
+							${node.declarations.length ? node : null}
+							${props.length > 0 && b `let { ${props} } = $$props;`}
+							${inserts}
+						`);
+                            return this.skip();
+                        }
+                    }
+                },
+                leave(node) {
+                    if (map.has(node)) {
+                        scope = scope.parent;
+                    }
+                }
+            });
+        }
+        hoist_instance_declarations() {
+            // we can safely hoist variable declarations that are
+            // initialised to literals, and functions that don't
+            // reference instance variables other than other
+            // hoistable functions. TODO others?
+            const { hoistable_nodes, var_lookup, injected_reactive_declaration_vars, imports } = this;
+            const top_level_function_declarations = new Map();
+            const { body } = this.ast.instance.content;
+            for (let i = 0; i < body.length; i += 1) {
+                const node = body[i];
+                if (node.type === 'VariableDeclaration') {
+                    const all_hoistable = node.declarations.every(d => {
+                        if (!d.init)
+                            return false;
+                        if (d.init.type !== 'Literal')
+                            return false;
+                        // everything except const values can be changed by e.g. svelte devtools
+                        // which means we can't hoist it
+                        if (node.kind !== 'const' && this.compile_options.dev)
+                            return false;
+                        const { name } = d.id;
+                        const v = this.var_lookup.get(name);
+                        if (v.reassigned)
+                            return false;
+                        if (v.export_name)
+                            return false;
+                        if (this.var_lookup.get(name).reassigned)
+                            return false;
+                        if (this.vars.find(variable => variable.name === name && variable.module)) {
+                            return false;
+                        }
+                        return true;
+                    });
+                    if (all_hoistable) {
+                        node.declarations.forEach(d => {
+                            const variable = this.var_lookup.get(d.id.name);
+                            variable.hoistable = true;
+                        });
+                        hoistable_nodes.add(node);
+                        body.splice(i--, 1);
+                        this.fully_hoisted.push(node);
+                    }
+                }
+                if (node.type === 'ExportNamedDeclaration' &&
+                    node.declaration &&
+                    node.declaration.type === 'FunctionDeclaration') {
+                    top_level_function_declarations.set(node.declaration.id.name, node);
+                }
+                if (node.type === 'FunctionDeclaration') {
+                    top_level_function_declarations.set(node.id.name, node);
+                }
+            }
+            const checked = new Set();
+            const walking = new Set();
+            const is_hoistable = fn_declaration => {
+                if (fn_declaration.type === 'ExportNamedDeclaration') {
+                    fn_declaration = fn_declaration.declaration;
+                }
+                const instance_scope = this.instance_scope;
+                let scope = this.instance_scope;
+                const map = this.instance_scope_map;
+                let hoistable = true;
+                // handle cycles
+                walking.add(fn_declaration);
+                walk(fn_declaration, {
+                    enter(node, parent) {
+                        if (!hoistable)
+                            return this.skip();
+                        if (map.has(node)) {
+                            scope = map.get(node);
+                        }
+                        if (is_reference(node, parent)) {
+                            const { name } = flatten_reference(node);
+                            const owner = scope.find_owner(name);
+                            if (injected_reactive_declaration_vars.has(name)) {
+                                hoistable = false;
+                            }
+                            else if (name[0] === '$' && !owner) {
+                                hoistable = false;
+                            }
+                            else if (owner === instance_scope) {
+                                const variable = var_lookup.get(name);
+                                if (variable.reassigned || variable.mutated)
+                                    hoistable = false;
+                                if (name === fn_declaration.id.name)
+                                    return;
+                                if (variable.hoistable)
+                                    return;
+                                if (top_level_function_declarations.has(name)) {
+                                    const other_declaration = top_level_function_declarations.get(name);
+                                    if (walking.has(other_declaration)) {
+                                        hoistable = false;
+                                    }
+                                    else if (other_declaration.type === 'ExportNamedDeclaration' &&
+                                        walking.has(other_declaration.declaration)) {
+                                        hoistable = false;
+                                    }
+                                    else if (!is_hoistable(other_declaration)) {
+                                        hoistable = false;
+                                    }
+                                }
+                                else {
+                                    hoistable = false;
+                                }
+                            }
+                            this.skip();
+                        }
+                    },
+                    leave(node) {
+                        if (map.has(node)) {
+                            scope = scope.parent;
+                        }
+                    }
+                });
+                checked.add(fn_declaration);
+                walking.delete(fn_declaration);
+                return hoistable;
+            };
+            for (const [name, node] of top_level_function_declarations) {
+                if (is_hoistable(node)) {
+                    const variable = this.var_lookup.get(name);
+                    variable.hoistable = true;
+                    hoistable_nodes.add(node);
+                    const i = body.indexOf(node);
+                    body.splice(i, 1);
+                    this.fully_hoisted.push(node);
+                }
+            }
+            for (const { specifiers } of imports) {
+                for (const specifier of specifiers) {
+                    const variable = var_lookup.get(specifier.local.name);
+                    if (!variable.mutated || variable.subscribable) {
+                        variable.hoistable = true;
+                    }
+                }
+            }
+        }
+        extract_reactive_declarations() {
+            const component = this;
+            const unsorted_reactive_declarations = [];
+            this.ast.instance.content.body.forEach(node => {
+                const ignores = extract_svelte_ignore_from_comments(node);
+                if (ignores.length)
+                    this.push_ignores(ignores);
+                if (node.type === 'LabeledStatement' && node.label.name === '$') {
+                    this.reactive_declaration_nodes.add(node);
+                    const assignees = new Set();
+                    const assignee_nodes = new Set();
+                    const dependencies = new Set();
+                    const module_dependencies = new Set();
+                    let scope = this.instance_scope;
+                    const map = this.instance_scope_map;
+                    walk(node.body, {
+                        enter(node, parent) {
+                            if (map.has(node)) {
+                                scope = map.get(node);
+                            }
+                            if (node.type === 'AssignmentExpression') {
+                                const left = get_object(node.left);
+                                extract_identifiers(left).forEach(node => {
+                                    assignee_nodes.add(node);
+                                    assignees.add(node.name);
+                                });
+                                if (node.operator !== '=') {
+                                    dependencies.add(left.name);
+                                }
+                            }
+                            else if (node.type === 'UpdateExpression') {
+                                const identifier = get_object(node.argument);
+                                assignees.add(identifier.name);
+                            }
+                            else if (is_reference(node, parent)) {
+                                const identifier = get_object(node);
+                                if (!assignee_nodes.has(identifier)) {
+                                    const { name } = identifier;
+                                    const owner = scope.find_owner(name);
+                                    const variable = component.var_lookup.get(name);
+                                    let should_add_as_dependency = true;
+                                    if (variable) {
+                                        variable.is_reactive_dependency = true;
+                                        if (variable.module && variable.writable) {
+                                            should_add_as_dependency = false;
+                                            module_dependencies.add(name);
+                                        }
+                                    }
+                                    const is_writable_or_mutated = variable && (variable.writable || variable.mutated);
+                                    if (should_add_as_dependency &&
+                                        (!owner || owner === component.instance_scope) &&
+                                        (name[0] === '$' || is_writable_or_mutated)) {
+                                        dependencies.add(name);
+                                    }
+                                }
+                                this.skip();
+                            }
+                        },
+                        leave(node) {
+                            if (map.has(node)) {
+                                scope = scope.parent;
+                            }
+                        }
+                    });
+                    if (module_dependencies.size > 0 && dependencies.size === 0) {
+                        component.warn(node.body, compiler_warnings.module_script_variable_reactive_declaration(Array.from(module_dependencies)));
+                    }
+                    const { expression } = node.body;
+                    const declaration = expression && expression.left;
+                    unsorted_reactive_declarations.push({
+                        assignees,
+                        dependencies,
+                        node,
+                        declaration
+                    });
+                }
+                if (ignores.length)
+                    this.pop_ignores();
+            });
+            const lookup = new Map();
+            unsorted_reactive_declarations.forEach(declaration => {
+                declaration.assignees.forEach(name => {
+                    if (!lookup.has(name)) {
+                        lookup.set(name, []);
+                    }
+                    // TODO warn or error if a name is assigned to in
+                    // multiple reactive declarations?
+                    lookup.get(name).push(declaration);
+                });
+            });
+            const cycle = check_graph_for_cycles(unsorted_reactive_declarations.reduce((acc, declaration) => {
+                declaration.assignees.forEach(v => {
+                    declaration.dependencies.forEach(w => {
+                        if (!declaration.assignees.has(w)) {
+                            acc.push([v, w]);
+                        }
+                    });
+                });
+                return acc;
+            }, []));
+            if (cycle && cycle.length) {
+                const declarationList = lookup.get(cycle[0]);
+                const declaration = declarationList[0];
+                return this.error(declaration.node, compiler_errors.cyclical_reactive_declaration(cycle));
+            }
+            const add_declaration = declaration => {
+                if (this.reactive_declarations.includes(declaration))
+                    return;
+                declaration.dependencies.forEach(name => {
+                    if (declaration.assignees.has(name))
+                        return;
+                    const earlier_declarations = lookup.get(name);
+                    if (earlier_declarations) {
+                        earlier_declarations.forEach(add_declaration);
+                    }
+                });
+                this.reactive_declarations.push(declaration);
+            };
+            unsorted_reactive_declarations.forEach(add_declaration);
+        }
+        warn_if_undefined(name, node, template_scope) {
+            if (name[0] === '$') {
+                if (name === '$' || name[1] === '$' && !is_reserved_keyword(name)) {
+                    return this.error(node, compiler_errors.illegal_global(name));
+                }
+                this.has_reactive_assignments = true; // TODO does this belong here?
+                if (is_reserved_keyword(name))
+                    return;
+                name = name.slice(1);
+            }
+            if (this.var_lookup.has(name) && !this.var_lookup.get(name).global)
+                return;
+            if (template_scope && template_scope.names.has(name))
+                return;
+            if (globals.has(name) && node.type !== 'InlineComponent')
+                return;
+            this.warn(node, compiler_warnings.missing_declaration(name, !!this.ast.instance));
+        }
+        push_ignores(ignores) {
+            this.ignores = new Set(this.ignores || []);
+            add_to_set(this.ignores, ignores);
+            this.ignore_stack.push(this.ignores);
+        }
+        pop_ignores() {
+            this.ignore_stack.pop();
+            this.ignores = this.ignore_stack[this.ignore_stack.length - 1];
+        }
+    }
+    function process_component_options(component, nodes) {
+        const component_options = {
+            immutable: component.compile_options.immutable || false,
+            accessors: 'accessors' in component.compile_options
+                ? component.compile_options.accessors
+                : !!component.compile_options.customElement,
+            preserveWhitespace: !!component.compile_options.preserveWhitespace,
+            namespace: component.compile_options.namespace
+        };
+        const node = nodes.find(node => node.name === 'svelte:options');
+        function get_value(attribute, { code, message }) {
+            const { value } = attribute;
+            const chunk = value[0];
+            if (!chunk)
+                return true;
+            if (value.length > 1) {
+                return component.error(attribute, { code, message });
+            }
+            if (chunk.type === 'Text')
+                return chunk.data;
+            if (chunk.expression.type !== 'Literal') {
+                return component.error(attribute, { code, message });
+            }
+            return chunk.expression.value;
+        }
+        if (node) {
+            node.attributes.forEach(attribute => {
+                if (attribute.type === 'Attribute') {
+                    const { name } = attribute;
+                    switch (name) {
+                        case 'tag': {
+                            const tag = get_value(attribute, compiler_errors.invalid_tag_attribute);
+                            if (typeof tag !== 'string' && tag !== null) {
+                                return component.error(attribute, compiler_errors.invalid_tag_attribute);
+                            }
+                            if (tag && !/^[a-zA-Z][a-zA-Z0-9]*-[a-zA-Z0-9-]+$/.test(tag)) {
+                                return component.error(attribute, compiler_errors.invalid_tag_property);
+                            }
+                            if (tag && !component.compile_options.customElement) {
+                                component.warn(attribute, compiler_warnings.missing_custom_element_compile_options);
+                            }
+                            component_options.tag = tag;
+                            break;
+                        }
+                        case 'namespace': {
+                            const ns = get_value(attribute, compiler_errors.invalid_namespace_attribute);
+                            if (typeof ns !== 'string') {
+                                return component.error(attribute, compiler_errors.invalid_namespace_attribute);
+                            }
+                            if (valid_namespaces.indexOf(ns) === -1) {
+                                const match = fuzzymatch(ns, valid_namespaces);
+                                return component.error(attribute, compiler_errors.invalid_namespace_property(ns, match));
+                            }
+                            component_options.namespace = ns;
+                            break;
+                        }
+                        case 'accessors':
+                        case 'immutable':
+                        case 'preserveWhitespace': {
+                            const value = get_value(attribute, compiler_errors.invalid_attribute_value(name));
+                            if (typeof value !== 'boolean') {
+                                return component.error(attribute, compiler_errors.invalid_attribute_value(name));
+                            }
+                            component_options[name] = value;
+                            break;
+                        }
+                        default:
+                            return component.error(attribute, compiler_errors.invalid_options_attribute_unknown);
+                    }
+                }
+                else {
+                    return component.error(attribute, compiler_errors.invalid_options_attribute);
+                }
+            });
+        }
+        return component_options;
+    }
+    function get_relative_path(from, to) {
+        const from_parts = from.split(/[/\\]/);
+        const to_parts = to.split(/[/\\]/);
+        from_parts.pop(); // get dirname
+        while (from_parts[0] === to_parts[0]) {
+            from_parts.shift();
+            to_parts.shift();
+        }
+        if (from_parts.length) {
+            let i = from_parts.length;
+            while (i--)
+                from_parts[i] = '..';
+        }
+        return from_parts.concat(to_parts).join('/');
+    }
+    function get_basename(filename) {
+        return filename.split(/[/\\]/).pop();
+    }
+    function get_sourcemap_source_filename(compile_options) {
+        if (!compile_options.filename)
+            return null;
+        return compile_options.outputFilename
+            ? get_relative_path(compile_options.outputFilename, compile_options.filename)
+            : get_basename(compile_options.filename);
+    }
+
+    function get_name_from_filename(filename) {
+        if (!filename)
+            return null;
+        const parts = filename.split(/[/\\]/).map(encodeURI);
+        if (parts.length > 1) {
+            const index_match = parts[parts.length - 1].match(/^index(\.\w+)/);
+            if (index_match) {
+                parts.pop();
+                parts[parts.length - 1] += index_match[1];
+            }
+        }
+        const base = parts.pop()
+            .replace(/%/g, 'u')
+            .replace(/\.[^.]+$/, '')
+            .replace(/[^a-zA-Z_$0-9]+/g, '_')
+            .replace(/^_/, '')
+            .replace(/_$/, '')
+            .replace(/^(\d)/, '_$1');
+        if (!base) {
+            throw new Error(`Could not derive component name from file ${filename}`);
+        }
+        return base[0].toUpperCase() + base.slice(1);
+    }
+
+    const valid_options = [
+        'format',
+        'name',
+        'filename',
+        'sourcemap',
+        'enableSourcemap',
+        'generate',
+        'errorMode',
+        'varsReport',
+        'outputFilename',
+        'cssOutputFilename',
+        'sveltePath',
+        'dev',
+        'accessors',
+        'immutable',
+        'hydratable',
+        'legacy',
+        'customElement',
+        'namespace',
+        'tag',
+        'css',
+        'loopGuardTimeout',
+        'preserveComments',
+        'preserveWhitespace',
+        'cssHash'
+    ];
+    function validate_options(options, warnings) {
+        const { name, filename, loopGuardTimeout, dev, namespace } = options;
+        Object.keys(options).forEach(key => {
+            if (!valid_options.includes(key)) {
+                const match = fuzzymatch(key, valid_options);
+                let message = `Unrecognized option '${key}'`;
+                if (match)
+                    message += ` (did you mean '${match}'?)`;
+                throw new Error(message);
+            }
+        });
+        if (name && !/^[a-zA-Z_$][a-zA-Z_$0-9]*$/.test(name)) {
+            throw new Error(`options.name must be a valid identifier (got '${name}')`);
+        }
+        if (name && /^[a-z]/.test(name)) {
+            const message = 'options.name should be capitalised';
+            warnings.push({
+                code: 'options-lowercase-name',
+                message,
+                filename,
+                toString: () => message
+            });
+        }
+        if (loopGuardTimeout && !dev) {
+            const message = 'options.loopGuardTimeout is for options.dev = true only';
+            warnings.push({
+                code: 'options-loop-guard-timeout',
+                message,
+                filename,
+                toString: () => message
+            });
+        }
+        if (namespace && valid_namespaces.indexOf(namespace) === -1) {
+            const match = fuzzymatch(namespace, valid_namespaces);
+            if (match) {
+                throw new Error(`Invalid namespace '${namespace}' (did you mean '${match}'?)`);
+            }
+            else {
+                throw new Error(`Invalid namespace '${namespace}'`);
+            }
+        }
+    }
+    function compile(source, options = {}) {
+        options = Object.assign({ generate: 'dom', dev: false, enableSourcemap: true }, options);
+        const stats = new Stats();
+        const warnings = [];
+        validate_options(options, warnings);
+        stats.start('parse');
+        const ast = parse$3(source, options);
+        stats.stop('parse');
+        stats.start('create component');
+        const component = new Component(ast, source, options.name || get_name_from_filename(options.filename) || 'Component', options, stats, warnings);
+        stats.stop('create component');
+        const result = options.generate === false
+            ? null
+            : options.generate === 'ssr'
+                ? ssr(component, options)
+                : dom(component, options);
+        return component.generate(result);
+    }
 
     /* src/App.svelte generated by Svelte v3.48.0 */
+
+    function get_each_context(ctx, list, i) {
+    	const child_ctx = ctx.slice();
+    	child_ctx[6] = list[i];
+    	return child_ctx;
+    }
+
+    // (124:2) {#each arr as item}
+    function create_each_block(ctx) {
+    	let p0;
+    	let t0;
+    	let t1_value = /*item*/ ctx[6][0] + "";
+    	let t1;
+    	let t2;
+    	let p1;
+    	let t3;
+    	let t4_value = /*item*/ ctx[6][1] + "";
+    	let t4;
+
+    	return {
+    		c() {
+    			p0 = element("p");
+    			t0 = text$1("Parent: ");
+    			t1 = text$1(t1_value);
+    			t2 = space();
+    			p1 = element("p");
+    			t3 = text$1("Child: ");
+    			t4 = text$1(t4_value);
+    		},
+    		m(target, anchor) {
+    			insert(target, p0, anchor);
+    			append(p0, t0);
+    			append(p0, t1);
+    			insert(target, t2, anchor);
+    			insert(target, p1, anchor);
+    			append(p1, t3);
+    			append(p1, t4);
+    		},
+    		p(ctx, dirty) {
+    			if (dirty & /*arr*/ 1 && t1_value !== (t1_value = /*item*/ ctx[6][0] + "")) set_data(t1, t1_value);
+    			if (dirty & /*arr*/ 1 && t4_value !== (t4_value = /*item*/ ctx[6][1] + "")) set_data(t4, t4_value);
+    		},
+    		d(detaching) {
+    			if (detaching) detach(p0);
+    			if (detaching) detach(t2);
+    			if (detaching) detach(p1);
+    		}
+    	};
+    }
 
     function create_fragment(ctx) {
     	let p;
     	let t0;
     	let t1;
+    	let t2;
+    	let each_1_anchor;
+    	let each_value = /*arr*/ ctx[0];
+    	let each_blocks = [];
+
+    	for (let i = 0; i < each_value.length; i += 1) {
+    		each_blocks[i] = create_each_block(get_each_context(ctx, each_value, i));
+    	}
 
     	return {
     		c() {
     			p = element("p");
     			t0 = text$1("Hello and Goodbye ");
-    			t1 = text$1(/*name*/ ctx[0]);
+    			t1 = text$1(/*name*/ ctx[1]);
+    			t2 = space();
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
+
+    			each_1_anchor = empty$2();
     		},
     		m(target, anchor) {
     			insert(target, p, anchor);
     			append(p, t0);
     			append(p, t1);
+    			insert(target, t2, anchor);
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(target, anchor);
+    			}
+
+    			insert(target, each_1_anchor, anchor);
     		},
     		p(ctx, [dirty]) {
-    			if (dirty & /*name*/ 1) set_data(t1, /*name*/ ctx[0]);
+    			if (dirty & /*name*/ 2) set_data(t1, /*name*/ ctx[1]);
+
+    			if (dirty & /*arr*/ 1) {
+    				each_value = /*arr*/ ctx[0];
+    				let i;
+
+    				for (i = 0; i < each_value.length; i += 1) {
+    					const child_ctx = get_each_context(ctx, each_value, i);
+
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(child_ctx, dirty);
+    					} else {
+    						each_blocks[i] = create_each_block(child_ctx);
+    						each_blocks[i].c();
+    						each_blocks[i].m(each_1_anchor.parentNode, each_1_anchor);
+    					}
+    				}
+
+    				for (; i < each_blocks.length; i += 1) {
+    					each_blocks[i].d(1);
+    				}
+
+    				each_blocks.length = each_value.length;
+    			}
     		},
-    		i: noop$1,
-    		o: noop$1,
+    		i: noop$2,
+    		o: noop$2,
     		d(detaching) {
     			if (detaching) detach(p);
+    			if (detaching) detach(t2);
+    			destroy_each(each_blocks, detaching);
+    			if (detaching) detach(each_1_anchor);
     		}
     	};
     }
@@ -16170,6 +32415,10 @@ var app = (function () {
     	});
 
     	return allComponentsParents;
+    }
+
+    function cb(str, arr, index, parent) {
+    	arr.push([parent ? parent.componentName : parent, str]);
     }
 
     function updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode) {
@@ -16198,10 +32447,12 @@ var app = (function () {
 
     function instance($$self, $$props, $$invalidate) {
     	let { name } = $$props;
+    	let { headNodes = [] } = $$props;
+    	let { currentComponents } = $$props;
+    	let { arr = [] } = $$props;
 
     	onMount(() => {
     		console.log("sending message from app mount");
-    		let headNodes = [];
     		const getNode = getComponentNode();
     		const port = chrome.runtime.connect({ name: "svelte-devtools-connection" });
 
@@ -16218,6 +32469,8 @@ var app = (function () {
 
     				msg.newArr.forEach(e => {
     					if (e.source) {
+    						const compileOutput = compile(e.source);
+    						console.log('compileOutput: ', compileOutput);
     						const ast = parse$3(e.source);
 
     						if (ast.instance && ast.instance.content && ast.instance.content.body) {
@@ -16239,8 +32492,15 @@ var app = (function () {
     				console.log('allComponents: ', allComponents);
     				const allComponentsParents = createParentObj(allComponents);
     				console.log('allComponentsParents: ', allComponentsParents);
-    				headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode);
+    				$$invalidate(2, headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode));
     				console.log('headNodes: ', headNodes);
+    				$$invalidate(3, currentComponents = headNodes);
+
+    				if (currentComponents[0]) {
+    					console.log('currentComponents[0]: ', currentComponents[0]);
+    					$$invalidate(0, arr = []);
+    					currentComponents[0].depthFirstPre(cb, arr);
+    				}
     			}
     		});
     	});
@@ -16250,6 +32510,19 @@ var app = (function () {
     			this.componentName = componentName;
     			this.parents = [];
     			this.children = [];
+    			this.depthFirstPre = this.depthFirstPre.bind(this);
+    		}
+
+    		depthFirstPre(callback, arr, index = 0, parent = null) {
+    			let current = this;
+    			callback(current.componentName, arr, index, parent);
+
+    			if (current.children.length) {
+    				for (let i = 0; i < current.children.length; i++) {
+    					index += 1;
+    					current.children[i].depthFirstPre(callback, arr, index, current);
+    				}
+    			}
     		}
     	}
 
@@ -16264,16 +32537,25 @@ var app = (function () {
     	}
 
     	$$self.$$set = $$props => {
-    		if ('name' in $$props) $$invalidate(0, name = $$props.name);
+    		if ('name' in $$props) $$invalidate(1, name = $$props.name);
+    		if ('headNodes' in $$props) $$invalidate(2, headNodes = $$props.headNodes);
+    		if ('currentComponents' in $$props) $$invalidate(3, currentComponents = $$props.currentComponents);
+    		if ('arr' in $$props) $$invalidate(0, arr = $$props.arr);
     	};
 
-    	return [name];
+    	return [arr, name, headNodes, currentComponents];
     }
 
     class App extends SvelteComponent {
     	constructor(options) {
     		super();
-    		init(this, options, instance, create_fragment, safe_not_equal, { name: 0 });
+
+    		init(this, options, instance, create_fragment, safe_not_equal, {
+    			name: 1,
+    			headNodes: 2,
+    			currentComponents: 3,
+    			arr: 0
+    		});
     	}
     }
 

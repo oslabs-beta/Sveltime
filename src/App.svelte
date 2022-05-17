@@ -1,10 +1,14 @@
 <script lang='ts'>
-  import { onMount } from 'svelte';
-  import { parse, walk} from 'svelte/compiler';
+  import { onMount, afterUpdate } from 'svelte';
+  import { compile, parse, walk} from 'svelte/compiler';
   export let name:string;
+  export let headNodes: any = [];
+  // export let currentComponents = headNodes;
+  export let currentComponents: any;
+  export let arr = [];
+
   onMount(() => {
     console.log("sending message from app mount");
-    let headNodes = [];
     const getNode = getComponentNode();
     const port = chrome.runtime.connect({name: "svelte-devtools-connection"});
     port.postMessage({
@@ -17,6 +21,8 @@
         const allComponents = {};
         msg.newArr.forEach((e) => {
           if (e.source){
+            const compileOutput = compile(e.source);
+            console.log('compileOutput: ', compileOutput);
             const ast = parse(e.source);
             if (ast.instance && ast.instance.content && ast.instance.content.body){
               const name = getComponentName(e.url);
@@ -29,7 +35,6 @@
               }
             });
             }
-            
           }
         })
         console.log('allComponents: ', allComponents);
@@ -37,9 +42,17 @@
         console.log('allComponentsParents: ', allComponentsParents);
         headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode);
         console.log('headNodes: ', headNodes);
+        currentComponents = headNodes;
+
+        if (currentComponents[0]){
+          console.log('currentComponents[0]: ', currentComponents[0]);
+          arr = [];
+          currentComponents[0].depthFirstPre(cb, arr);
+        }
       }   
     });
   });
+
 
   function getComponentName(filePath){
     return filePath.slice(filePath.lastIndexOf('/') + 1, filePath.lastIndexOf('.'));
@@ -66,7 +79,22 @@
       this.componentName = componentName;
       this.parents = [];
       this.children = [];
+      this.depthFirstPre = this.depthFirstPre.bind(this);
     }
+    depthFirstPre(callback,  arr, index = 0, parent = null){
+      let current = this;
+      callback(current.componentName, arr, index, parent);
+      if (current.children.length){
+      for (let i = 0; i < current.children.length; i++){
+        index += 1;
+        current.children[i].depthFirstPre(callback, arr, index, current);
+      }
+    }
+    }
+  }
+ 
+  function cb(str, arr, index, parent){
+    arr.push([(parent ? parent.componentName : parent), str]);
   }
 
   function getComponentNode(){
@@ -96,8 +124,14 @@
     });
     return headNodes;
   }
-   
+  
   </script>
   
-  <p>Hello and Goodbye {name}</p>
+  <p>Hello and Goodbye {name} </p>
+ 
+
+  {#each arr as item}
+      <p>Parent: {item[0]}</p>
+      <p>Child: {item[1]}</p>
+  {/each}
   
