@@ -17,7 +17,8 @@
       "matches": [
         "<all_urls>"
       ],
-      "js": ["/extension/js/content.js"]
+      "js": ["/extension/js/content.js"],
+      "run_at": "document_start"
     }
   ],
 
@@ -26,6 +27,7 @@
   },
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting"
   ]
 }
