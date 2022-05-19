@@ -15,7 +15,7 @@
     padding: 2px 10px;
     margin: 10px;
     border-radius: 6px;
-    border: 2px solid brown;
+    /* border: 2px solid brown; */
     cursor: pointer;
     margin-left: var(--leftMargin, 4rem);
     width: 200px;
@@ -25,6 +25,7 @@
     background-color: rgb(84, 154, 84);
     cursor: pointer;
     color: white;
+    border: none;
   }
 </style>
 
