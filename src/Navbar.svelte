@@ -5,44 +5,47 @@
   export let showStores
   export let showTree
   export let showAbout
+  export let openModal
+  export let isOpenModal
 </script>
 
 <style>
+  * {
+    padding: 0;
+    margin: 0;
+    box-sizing: border-box;
+  }
   .navbar {
     height: 65px;
-    background-color: #627d98;
+    background-color: rgba(42, 44, 52, 1);
     display: flex;
     flex-direction: row;
     justify-content: space-between;
     align-items: center;
     gap: 20px;
-    padding: 15px;
+
+    border-bottom: 1px solid rgb(115, 117, 126);
   }
-  .stores,
-  .tree {
-    height: 40px;
-    background-color: brown;
+  .btn {
+    min-height: 40px;
+    background-color: transparent;
     color: white;
-    border-radius: 12px;
-    width: 66px;
-    margin-left: 15px;
     border: none;
-  }
-  .storesAlt,
-  .treeAlt {
-    height: 40px;
-    background-color: rgba(165, 42, 42, 0.41);
-    color: white;
-    border-radius: 12px;
-    width: 66px;
-    margin-left: 15px;
+    width: 80px;
+    margin: 0 12px;
+    cursor: pointer;
+    box-sizing: border-box;
+    border-bottom: 2px solid transparent;
+    font-size: 1.2em;
   }
 
-  .storesAlt:hover,
-  .treeAlt:hover,
-  .stores:hover,
-  .treeAlt:hover {
-    transform: scale(1.05);
+  .on,
+  .on.btn:hover {
+    border-bottom: 2px solid orange;
+  }
+
+  .btn:hover {
+    border-bottom: 2px solid rgba(255, 192, 203, 0.213);
   }
 
   h1 {
@@ -52,11 +55,12 @@
   }
   .buttonBox {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     margin-right: 20px;
   }
   .logoTitle {
-    color: rgb(250, 136, 36);
+    color: rgba(235, 80, 39, 1);
+    letter-spacing: 1px;
     font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif;
     font-size: 2em;
     font-weight: 800;
@@ -69,19 +73,17 @@
   <h1 class="logoTitle">SVELTIME</h1>
   <div class="buttonBox">
     <button
-      class={showStores ? 'stores' : 'storesAlt'}
+      class={showStores ? 'btn on' : 'btn off'}
       on:click={() => handleShowStores()}>
       Stores
     </button>
     <button
-      class={showTree ? 'tree' : 'treeAlt'}
+      class={showTree ? 'btn on' : 'btn off'}
       on:click={() => handleShowTree()}>
-      Tree
+      Components
     </button>
-    <button
-      class={showAbout ? 'about' : 'aboutAlt'}
-      on:click={() => handleShowAbout()}>
-      Tree
+    <button class={isOpenModal ? 'btn on' : 'btn off'} on:click={openModal}>
+      About Us
     </button>
   </div>
 </div>

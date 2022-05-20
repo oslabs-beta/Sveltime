@@ -151,8 +151,11 @@
   function handleItemClick() {
     console.log('item click: ')
   }
-  function handleButtonClick() {
-    console.log('button click: ')
+  function handleButtonClick(e) {
+    console.log('button click: ', e.target)
+  }
+  function handleStoreClick(e) {
+    console.log('store click: ', e.target)
   }
   export let showStores = true
   export let showTree = true
@@ -173,10 +176,22 @@
     showTree = !showTree
   }
   let storeArr = [
-    ['one', 'two', 'three'],
-    ['1', '2', '3'],
-    ['A', 'B', 'C'],
+    [' one', ' two', ' three'],
+    [' 1', ' 2', ' 3'],
+    [' A', ' B', ' C'],
   ]
+
+  import Modal from './Modal.svelte'
+
+  let isOpenModal: boolean = false
+
+  function openModal(): void {
+    isOpenModal = true
+  }
+
+  function closeModal(): void {
+    isOpenModal = false
+  }
 </script>
 
 <style>
@@ -197,11 +212,14 @@
   {handleShowAbout}
   {showStores}
   {showTree}
-  {showAbout} />
+  {showAbout}
+  {openModal}
+  {closeModal}
+  {isOpenModal} />
 <div class="container">
-  {#if showAbout}
-    <ShowAbout />
-  {/if}
+
+  <Modal {isOpenModal} on:closeModal={closeModal} />
+
   {#if showStores}
     <AllStores {storeArr} />
   {/if}

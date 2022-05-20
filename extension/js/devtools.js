@@ -1,14 +1,16 @@
-chrome.devtools.panels.create("tool-test", null, "/public/index.html", null);
+chrome.devtools.panels.create("Sveltime", null, "/public/index.html", null);
 
-chrome.runtime.onConnect.addListener(port => {
-  console.assert(port.name === 'svelte-devtools-connection');
+chrome.runtime.onConnect.addListener((port) => {
+  console.assert(port.name === "svelte-devtools-connection");
   port.onMessage.addListener((msg) => {
     let arrSvelteFiles;
-    if (msg.name === 'start') {
+    if (msg.name === "start") {
       chrome.devtools.inspectedWindow.getResources((resources) => {
-        console.log('resources: ', resources);
-        arrSvelteFiles = resources.filter((file) => !!file.url.match(/.svelte$/));
-        console.log('svelte files array: ', arrSvelteFiles);
+        console.log("resources: ", resources);
+        arrSvelteFiles = resources.filter(
+          (file) => !!file.url.match(/.svelte$/)
+        );
+        console.log("svelte files array: ", arrSvelteFiles);
         const newArr = [];
         function recursiveCreateNewArr(arrSvelteFiles, index = 0) {
           if (arrSvelteFiles[index] === undefined) {
@@ -25,7 +27,7 @@ chrome.runtime.onConnect.addListener(port => {
           });
         }
         recursiveCreateNewArr(arrSvelteFiles);
-        console.log('newArr: ', newArr);
+        console.log("newArr: ", newArr);
       });
     }
   });
