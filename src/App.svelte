@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte'
   import { compile, parse, walk } from 'svelte/compiler'
-  import Container from './Container.svelte'
+  import AllStores from './allStores.svelte'
+  import ElementTree from './ElementTree.svelte'
+  import Navbar from './Navbar.svelte'
+
   export let headNodes: any = []
   // export let currentComponents = headNodes;
   export let currentComponents: any
@@ -151,21 +154,60 @@
   function handleButtonClick() {
     console.log('button click: ')
   }
+  export let showStores = true
+  export let showTree = true
+  export let showAbout = true
+
+  function handleShowStores() {
+    if (!showTree) return
+    showStores = !showStores
+  }
+
+  function handleShowTree() {
+    if (!showStores) return
+    showTree = !showTree
+  }
+
+  function handleShowAbout() {
+    if (!showStores) return
+    showTree = !showTree
+  }
+  let storeArr = [
+    ['one', 'two', 'three'],
+    ['1', '2', '3'],
+    ['A', 'B', 'C'],
+  ]
 </script>
 
 <style>
-
+  * {
+    margin: 0;
+    padding: 0;
+  }
+  .container {
+    display: flex;
+    justify-content: space-around;
+    align-items: flex-start;
+  }
 </style>
 
-<div>
-  <h1>The Components:</h1>
-  {#each arr as item, i}
-    <Container
-      name={item[1]}
-      parent={item[0]}
-      id={item[2]}
-      {handleItemClick}
-      {handleButtonClick}
-      --leftMargin="{item[2] * 5}rem" />
-  {/each}
+<Navbar
+  {handleShowStores}
+  {handleShowTree}
+  {handleShowAbout}
+  {showStores}
+  {showTree}
+  {showAbout} />
+<div class="container">
+  {#if showAbout}
+    <ShowAbout />
+  {/if}
+  {#if showStores}
+    <AllStores {storeArr} />
+  {/if}
+  {#if showTree}
+    <ElementTree {arr} {handleItemClick} {handleButtonClick} />
+  {/if}
+  <!-- {showStores ? <AllStores {storeArr} /> : null}
+  {showTree ? <ElementTree {arr} {handleItemClick} {handleButtonClick} /> : null} -->
 </div>
