@@ -32421,12 +32421,12 @@ var app = (function () {
 
     function get_each_context(ctx, list, i) {
     	const child_ctx = ctx.slice();
-    	child_ctx[5] = list[i];
-    	child_ctx[7] = i;
+    	child_ctx[8] = list[i];
+    	child_ctx[10] = i;
     	return child_ctx;
     }
 
-    // (136:2) {#each arr as item, i}
+    // (270:2) {#each arr as item, i}
     function create_each_block(ctx) {
     	let container;
     	let div;
@@ -32435,9 +32435,9 @@ var app = (function () {
 
     	container = new Container({
     			props: {
-    				name: /*item*/ ctx[5][1],
-    				parent: /*item*/ ctx[5][0],
-    				id: /*item*/ ctx[5][2],
+    				name: /*item*/ ctx[8][1],
+    				parent: /*item*/ ctx[8][0],
+    				id: /*item*/ ctx[8][2],
     				handleItemClick,
     				handleButtonClick
     			}
@@ -32448,7 +32448,7 @@ var app = (function () {
     			div = element("div");
     			create_component(container.$$.fragment);
     			set_style(div, "display", "contents");
-    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[5][2] * 5 + "rem"));
+    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[8][2] * 5 + "rem"));
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32456,14 +32456,14 @@ var app = (function () {
     			current = true;
     		},
     		p(ctx, dirty) {
-    			if (dirty & /*arr*/ 1 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[5][2] * 5 + "rem"))) {
+    			if (dirty & /*arr*/ 1 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[8][2] * 5 + "rem"))) {
     				set_style(div, "--leftMargin", __leftMargin_last);
     			}
 
     			const container_changes = {};
-    			if (dirty & /*arr*/ 1) container_changes.name = /*item*/ ctx[5][1];
-    			if (dirty & /*arr*/ 1) container_changes.parent = /*item*/ ctx[5][0];
-    			if (dirty & /*arr*/ 1) container_changes.id = /*item*/ ctx[5][2];
+    			if (dirty & /*arr*/ 1) container_changes.name = /*item*/ ctx[8][1];
+    			if (dirty & /*arr*/ 1) container_changes.parent = /*item*/ ctx[8][0];
+    			if (dirty & /*arr*/ 1) container_changes.id = /*item*/ ctx[8][2];
     			container.$set(container_changes);
     		},
     		i(local) {
@@ -32573,6 +32573,103 @@ var app = (function () {
     	};
     }
 
+    function getRenderedComponentParent(renderedComponentsArr, component, index, getNode) {
+    	const node = getNode(component);
+
+    	// console.log('node: ', node);
+    	// console.log('node.parents: ', node.parents);
+    	if (node.parents === null) {
+    		return null;
+    	}
+
+    	// else if (node.parents.length === 1) {
+    	//   return node.parents[0].componentName;
+    	// }
+    	for (let i = index + 1; i < renderedComponentsArr.length; i++) {
+    		for (let j = 0; j < node.parents.length; j++) {
+    			if (node.parents[j].componentName === renderedComponentsArr[i]) {
+    				return [renderedComponentsArr[i], i];
+    			}
+    		}
+    	}
+    }
+
+    function getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode) {
+    	const node = getNode(component);
+
+    	if (node.componentName === 'FeedbackItem') {
+    		console.log('node: ', node);
+    		console.log('node.children: ', node.children);
+    	}
+
+    	const children = [];
+    	const objChildren = {};
+
+    	for (let i = index - 1; i >= 0; i--) {
+
+    		if (isSiblingRenderedComponent(component, renderedComponentsArr[i], getRenderedNode, getNode)) {
+    			if (node.componentName === 'FeedbackItem') {
+    				console.log('i am a sibling: ', renderedComponentsArr[i]);
+    			}
+
+    			break;
+    		}
+
+    		if (node.parents) {
+    			let shouldBreak = false;
+
+    			for (let k = 0; k < node.parents.length; k++) {
+    				if (isSiblingRenderedComponent(node.parents[k].componentName, renderedComponentsArr[i], getRenderedNode, getNode)) {
+    					if (node.componentName === 'FeedbackItem') {
+    						console.log('i am here, node.parents[k]: ', node.parents[k].componentName);
+    						console.log('i am here, rederendComponentArr[i]: ', renderedComponentsArr[i]);
+    					}
+
+    					shouldBreak = true;
+    					break;
+    				}
+    			}
+
+    			if (shouldBreak === true) break;
+    		}
+
+    		for (let j = 0; j < node.children.length; j++) {
+    			if (node.children[j].componentName === renderedComponentsArr[i]) {
+    				// console.log('i am here 2');
+    				if (!objChildren[renderedComponentsArr[i]]) {
+    					objChildren[renderedComponentsArr[i]] = [i];
+    					children.push([renderedComponentsArr[i], i]);
+    				} else if (!objChildren[renderedComponentsArr[i]].includes(i)) {
+    					objChildren[renderedComponentsArr[i]].push(i);
+    					children.push([renderedComponentsArr[i], i]);
+    				}
+    			}
+    		}
+    	}
+
+    	if (node.componentName === 'FeedbackItem') {
+    		console.log('children: ', children);
+    	}
+
+    	return children;
+    }
+
+    function isSiblingRenderedComponent(component1, component2, getRenderedNode, getNode) {
+    	if (component1 === 'FeedbackItem') {
+    		console.log('component2: ', component2);
+    	}
+
+    	if (component1 === component2) return true;
+
+    	if (getNode(component1).parents && getNode(component2).parents) {
+    		for (const parent of getNode(component1).parents) {
+    			if (getNode(component2).parents.includes(parent)) return true;
+    		}
+    	}
+
+    	return false;
+    }
+
     function getComponentName(filePath) {
     	return filePath.slice(filePath.lastIndexOf('/') + 1, filePath.lastIndexOf('.'));
     }
@@ -32635,10 +32732,18 @@ var app = (function () {
     	let { headNodes = [] } = $$props;
     	let { currentComponents } = $$props;
     	let { arr = [] } = $$props;
+    	let { renderedComponentsArr } = $$props;
+    	let { renderedComponents } = $$props;
 
+    	// chrome.runtime.onMessage.addListener((msg, sender, response) => {
+    	//     console.log('arr received onMessage: ', msg);
+    	//   });
     	onMount(() => {
-    		console.log('sending message from app mount');
+    		// console.log('sending message from app mount');
+    		// chrome.runtime.sendMessage('app component mounted');
     		const getNode = getComponentNode();
+
+    		const getRenderedNode = getRenderedComponentNode();
     		const port = chrome.runtime.connect({ name: 'svelte-devtools-connection' });
 
     		port.postMessage({
@@ -32647,15 +32752,15 @@ var app = (function () {
     		});
 
     		port.onMessage.addListener(msg => {
-    			console.log('msg received: ', msg);
-
+    			// console.log('msg received from port: ', msg)
     			if (msg.newArr) {
     				const allComponents = {};
 
     				msg.newArr.forEach(e => {
     					if (e.source) {
-    						const compileOutput = compile(e.source);
-    						console.log('compileOutput: ', compileOutput);
+    						compile(e.source);
+
+    						// console.log('compileOutput: ', compileOutput)
     						const ast = parse$3(e.source);
 
     						if (ast.instance && ast.instance.content && ast.instance.content.body) {
@@ -32674,18 +32779,57 @@ var app = (function () {
     					}
     				});
 
-    				console.log('allComponents: ', allComponents);
+    				// console.log('allComponents: ', allComponents)
     				const allComponentsParents = createParentObj(allComponents);
-    				console.log('allComponentsParents: ', allComponentsParents);
+
+    				// console.log('allComponentsParents: ', allComponentsParents)
     				$$invalidate(1, headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode));
+
     				console.log('headNodes: ', headNodes);
     				$$invalidate(2, currentComponents = headNodes);
+    				const portBackground = chrome.runtime.connect({ name: 'svelte-background-connection' });
 
-    				if (currentComponents[0]) {
-    					console.log('currentComponents[0]: ', currentComponents[0]);
-    					$$invalidate(0, arr = []);
-    					currentComponents[0].depthFirstPre(cb, arr);
-    				}
+    				portBackground.postMessage({
+    					name: 'app mounted',
+    					tabId: chrome.devtools.inspectedWindow.tabId
+    				});
+
+    				portBackground.onMessage.addListener(msg => {
+    					console.log('message received in App.svelte from background.js: ', msg);
+    					$$invalidate(3, renderedComponentsArr = msg);
+
+    					renderedComponentsArr.forEach((component, index) => {
+    						// renderedComponents = new ComponentNode(component);
+    						$$invalidate(4, renderedComponents = getRenderedNode(component, index));
+
+    						const parent = getRenderedComponentParent(renderedComponentsArr, component, index, getNode);
+
+    						if (parent) {
+    							// renderedComponents.parents = [new ComponentNode(parent)];
+    							$$invalidate(4, renderedComponents.parents = [getRenderedNode(parent[0], parent[1])], renderedComponents);
+    						} else {
+    							$$invalidate(4, renderedComponents.parents = null, renderedComponents);
+    						}
+
+    						const children = getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode);
+
+    						if (children.length) {
+    							children.forEach(child => {
+    								// renderedComponents.children.push(new ComponentNode(child));
+    								renderedComponents.children.push(getRenderedNode(child[0], child[1]));
+    							});
+    						}
+    					});
+
+    					console.log('renderedComponents: ', renderedComponents);
+
+    					if (currentComponents[0]) {
+    						$$invalidate(2, currentComponents[0] = renderedComponents, currentComponents);
+    						console.log('currentComponents[0]: ', currentComponents[0]);
+    						$$invalidate(0, arr = []);
+    						currentComponents[0].depthFirstPre(cb, arr);
+    					}
+    				});
     			}
     		});
     	});
@@ -32711,6 +32855,17 @@ var app = (function () {
     		}
     	}
 
+    	function getRenderedComponentNode() {
+    		const componentObj = {};
+
+    		return function (componentName, id) {
+    			const key = componentName + id;
+    			if (componentObj.hasOwnProperty(key)) return componentObj[key];
+    			const node = new ComponentNode(componentName);
+    			return componentObj[key] = node;
+    		};
+    	}
+
     	function getComponentNode() {
     		const componentObj = {};
 
@@ -32725,9 +32880,11 @@ var app = (function () {
     		if ('headNodes' in $$props) $$invalidate(1, headNodes = $$props.headNodes);
     		if ('currentComponents' in $$props) $$invalidate(2, currentComponents = $$props.currentComponents);
     		if ('arr' in $$props) $$invalidate(0, arr = $$props.arr);
+    		if ('renderedComponentsArr' in $$props) $$invalidate(3, renderedComponentsArr = $$props.renderedComponentsArr);
+    		if ('renderedComponents' in $$props) $$invalidate(4, renderedComponents = $$props.renderedComponents);
     	};
 
-    	return [arr, headNodes, currentComponents];
+    	return [arr, headNodes, currentComponents, renderedComponentsArr, renderedComponents];
     }
 
     class App extends SvelteComponent {
@@ -32737,7 +32894,9 @@ var app = (function () {
     		init(this, options, instance, create_fragment, safe_not_equal, {
     			headNodes: 1,
     			currentComponents: 2,
-    			arr: 0
+    			arr: 0,
+    			renderedComponentsArr: 3,
+    			renderedComponents: 4
     		});
     	}
     }

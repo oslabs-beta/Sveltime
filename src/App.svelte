@@ -1,28 +1,39 @@
 <script lang="ts">
   import { onMount, afterUpdate } from 'svelte'
   import { compile, parse, walk } from 'svelte/compiler'
+import { get } from 'svelte/store';
   import Container from './Container.svelte'
   export let headNodes: any = []
   // export let currentComponents = headNodes;
   export let currentComponents: any
   export let arr = []
+  export let renderedComponentsArr: any;
+  export let renderedComponents: any;
+
+  // chrome.runtime.onMessage.addListener((msg, sender, response) => {
+  //     console.log('arr received onMessage: ', msg);
+  //   });
 
   onMount(() => {
-    console.log('sending message from app mount')
-    const getNode = getComponentNode()
-    const port = chrome.runtime.connect({ name: 'svelte-devtools-connection' })
+    
+    // console.log('sending message from app mount');
+    // chrome.runtime.sendMessage('app component mounted');
+    const getNode = getComponentNode();
+    const getRenderedNode = getRenderedComponentNode();
+    
+    const port = chrome.runtime.connect({ name: 'svelte-devtools-connection' });
     port.postMessage({
       name: 'start',
       tabId: chrome.devtools.inspectedWindow.tabId,
     })
     port.onMessage.addListener((msg) => {
-      console.log('msg received: ', msg)
+      // console.log('msg received from port: ', msg)
       if (msg.newArr) {
         const allComponents = {}
         msg.newArr.forEach((e) => {
           if (e.source) {
             const compileOutput = compile(e.source)
-            console.log('compileOutput: ', compileOutput)
+            // console.log('compileOutput: ', compileOutput)
             const ast = parse(e.source)
             if (
               ast.instance &&
@@ -44,9 +55,9 @@
             }
           }
         })
-        console.log('allComponents: ', allComponents)
+        // console.log('allComponents: ', allComponents)
         const allComponentsParents = createParentObj(allComponents)
-        console.log('allComponentsParents: ', allComponentsParents)
+        // console.log('allComponentsParents: ', allComponentsParents)
         headNodes = updateHeadNodes(
           allComponents,
           allComponentsParents,
@@ -56,14 +67,138 @@
         console.log('headNodes: ', headNodes)
         currentComponents = headNodes
 
+        const portBackground = chrome.runtime.connect({
+          name: 'svelte-background-connection' });
+        portBackground.postMessage({
+          name: 'app mounted',
+          tabId: chrome.devtools.inspectedWindow.tabId,
+        });
+        portBackground.onMessage.addListener((msg) => {
+          console.log('message received in App.svelte from background.js: ', msg);
+          renderedComponentsArr = msg;
+
+          renderedComponentsArr.forEach((component, index) => {
+          // renderedComponents = new ComponentNode(component);
+          renderedComponents = getRenderedNode(component, index);
+          const parent = getRenderedComponentParent(renderedComponentsArr, component, index, getNode);
+          if (parent) {
+            // renderedComponents.parents = [new ComponentNode(parent)];
+            renderedComponents.parents = [getRenderedNode(parent[0], parent[1] )];
+          } else {
+            renderedComponents.parents = null;
+          }
+          const children = getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode);
+          if (children.length) {
+            children.forEach( child => {
+              // renderedComponents.children.push(new ComponentNode(child));
+              renderedComponents.children.push(getRenderedNode(child[0], child[1]));
+            });
+          }
+        });
+        console.log('renderedComponents: ', renderedComponents);
+
         if (currentComponents[0]) {
+          currentComponents[0] = renderedComponents;
           console.log('currentComponents[0]: ', currentComponents[0])
           arr = []
           currentComponents[0].depthFirstPre(cb, arr)
         }
+        });
       }
     })
   })
+
+  function getRenderedComponentParent(renderedComponentsArr, component, index, getNode){
+    const node = getNode(component);
+    // console.log('node: ', node);
+    // console.log('node.parents: ', node.parents);
+    if (node.parents === null){
+      return null;
+    } 
+    // else if (node.parents.length === 1) {
+    //   return node.parents[0].componentName;
+    // }
+    for (let i = index + 1; i < renderedComponentsArr.length; i++) {
+      for (let j = 0; j < node.parents.length; j++) {
+        if (node.parents[j].componentName === renderedComponentsArr[i]) {
+          return [renderedComponentsArr[i], i];
+        }
+      }
+    }
+  }
+
+  function getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode){
+    const node = getNode(component);
+    if (node.componentName === 'FeedbackItem'){
+      console.log('node: ', node);
+      console.log('node.children: ', node.children);
+    }
+    
+    const children = [];
+    const objChildren = {};
+    let count = 0;
+    for (let i = index - 1; i >= 0; i--) {
+      count = 0;
+      if (isSiblingRenderedComponent(component, renderedComponentsArr[i], getRenderedNode, getNode)) {
+        if (node.componentName === 'FeedbackItem') {
+          console.log('i am a sibling: ', renderedComponentsArr[i]);
+        }
+        break;
+      }
+      if (node.parents) {
+        let shouldBreak = false;
+        for (let k = 0; k < node.parents.length; k++) {
+          if (isSiblingRenderedComponent(node.parents[k].componentName, renderedComponentsArr[i], getRenderedNode, getNode)) {
+            
+            if (node.componentName === 'FeedbackItem') {
+              console.log('i am here, node.parents[k]: ', node.parents[k].componentName);
+              console.log('i am here, rederendComponentArr[i]: ', renderedComponentsArr[i] )
+             
+            }
+          shouldBreak = true;
+          break;
+        }
+      }
+      if (shouldBreak === true) break;
+      }
+      
+
+
+      for (let j = 0; j< node.children.length; j++) {
+        if (node.children[j].componentName === renderedComponentsArr[i]) {
+          // console.log('i am here 2');
+        
+          if (!objChildren[renderedComponentsArr[i]]) {
+            
+            objChildren[renderedComponentsArr[i]] = [i];
+            children.push([renderedComponentsArr[i], i]);
+          } 
+          else if (!objChildren[renderedComponentsArr[i]].includes(i)) {
+            objChildren[renderedComponentsArr[i]].push(i);
+            children.push([renderedComponentsArr[i], i]);
+          }
+          count++;
+        }
+      }
+    }
+    if (node.componentName === 'FeedbackItem') {
+    console.log('children: ', children);
+    }
+    return children;
+  }
+
+  function isSiblingRenderedComponent(component1, component2, getRenderedNode, getNode) {
+    if(component1 === 'FeedbackItem'){
+      console.log('component2: ', component2);
+    }
+    if (component1 === component2) return true;
+    if (getNode(component1).parents && getNode(component2).parents) {
+      for (const parent of getNode(component1).parents){
+        if (getNode(component2).parents.includes(parent)) return true;
+      }
+    }
+    return false;
+  }
 
   function getComponentName(filePath) {
     return filePath.slice(
@@ -109,6 +244,18 @@
 
   function cb(str, arr, index, parent) {
     arr.push([parent ? parent.componentName : parent, str, index])
+  }
+
+  function getRenderedComponentNode() {
+    const componentObj = {}
+
+    return function (componentName, id) {
+      const key = componentName + id;
+      if (componentObj.hasOwnProperty(key))
+        return componentObj[key]
+      const node = new ComponentNode(componentName)
+      return (componentObj[key] = node)
+    }
   }
 
   function getComponentNode() {
