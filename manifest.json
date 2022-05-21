@@ -1,22 +1,17 @@
 {
   "manifest_version": 3,
 
-  "name": "Tool Test",
+  "name": "Sveltime",
   "version": "1.0",
 
   "description": "Developer Tools for Svelte",
   "author": "Team Sveltetime",
 
   "devtools_page": "extension/html/devtools.html",
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["/extension/js/content.js"],
       "run_at": "document_start"
     }
@@ -25,9 +20,5 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": [
-    "activeTab",
-    "tabs",
-    "scripting"
-  ]
+  "permissions": ["activeTab", "tabs", "scripting"]
 }
