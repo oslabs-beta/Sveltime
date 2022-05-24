@@ -33113,7 +33113,7 @@ var app = (function () {
     	};
     }
 
-    // (332:2) {#if showTree}
+    // (339:2) {#if showTree}
     function create_if_block(ctx) {
     	let elementtree;
     	let current;
@@ -33315,10 +33315,8 @@ var app = (function () {
     function getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode) {
     	const node = getNode(component);
 
-    	if (node.componentName === 'FeedbackItem') {
-    		console.log('node: ', node);
-    		console.log('node.children: ', node.children);
-    	}
+    	if (node.componentName === 'FeedbackItem') ; // console.log('node: ', node)
+    	// console.log('node.children: ', node.children)
 
     	const children = [];
     	const objChildren = {};
@@ -33326,9 +33324,7 @@ var app = (function () {
     	for (let i = index - 1; i >= 0; i--) {
 
     		if (isSiblingRenderedComponent(component, renderedComponentsArr[i], getRenderedNode, getNode)) {
-    			if (node.componentName === 'FeedbackItem') {
-    				console.log('i am a sibling: ', renderedComponentsArr[i]);
-    			}
+    			if (node.componentName === 'FeedbackItem') ; // console.log('i am a sibling: ', renderedComponentsArr[i])
 
     			break;
     		}
@@ -33338,12 +33334,17 @@ var app = (function () {
 
     			for (let k = 0; k < node.parents.length; k++) {
     				if (isSiblingRenderedComponent(node.parents[k].componentName, renderedComponentsArr[i], getRenderedNode, getNode)) {
-    					if (node.componentName === 'FeedbackItem') {
-    						console.log('i am here, node.parents[k]: ', node.parents[k].componentName);
-    						console.log('i am here, rederendComponentArr[i]: ', renderedComponentsArr[i]);
-    					}
+    					if (node.componentName === 'FeedbackItem') ; // console.log(
+    					//   'i am here, node.parents[k]: ',
 
+    					//   node.parents[k].componentName,
+    					// )
+    					// console.log(
+    					//   'i am here, rederendComponentArr[i]: ',
+    					//   renderedComponentsArr[i],
+    					// )
     					shouldBreak = true;
+
     					break;
     				}
     			}
@@ -33365,17 +33366,12 @@ var app = (function () {
     		}
     	}
 
-    	if (node.componentName === 'FeedbackItem') {
-    		console.log('children: ', children);
-    	}
+    	if (node.componentName === 'FeedbackItem') ; // console.log('children: ', children)
 
     	return children;
     }
 
     function isSiblingRenderedComponent(component1, component2, getRenderedNode, getNode) {
-    	if (component1 === 'FeedbackItem') {
-    		console.log('component2: ', component2);
-    	}
 
     	if (component1 === component2) return true;
 
@@ -33461,7 +33457,7 @@ var app = (function () {
     		// chrome.runtime.sendMessage('app component mounted');
     		const getNode = getComponentNode();
 
-    		const getRenderedNode = getRenderedComponentNode();
+    		let getRenderedNode = getRenderedComponentNode();
     		const port = chrome.runtime.connect({ name: 'svelte-devtools-connection' });
 
     		port.postMessage({
@@ -33515,6 +33511,7 @@ var app = (function () {
     				portBackground.onMessage.addListener(msg => {
     					console.log('message received in App.svelte from background.js: ', msg);
     					$$invalidate(13, renderedComponentsArr = msg);
+    					getRenderedNode = getRenderedComponentNode();
 
     					renderedComponentsArr.forEach((component, index) => {
     						// renderedComponents = new ComponentNode(component);
@@ -33543,8 +33540,10 @@ var app = (function () {
 
     					if (currentComponents[0]) {
     						$$invalidate(12, currentComponents[0] = renderedComponents, currentComponents);
-    						console.log('currentComponents[0]: ', currentComponents[0]);
+
+    						// console.log('currentComponents[0]: ', currentComponents[0])
     						$$invalidate(0, arr = []);
+
     						currentComponents[0].depthFirstPre(cb, arr);
     					}
     				});
