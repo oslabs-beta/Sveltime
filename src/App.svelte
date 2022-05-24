@@ -23,7 +23,7 @@
     // console.log('sending message from app mount');
     // chrome.runtime.sendMessage('app component mounted');
     const getNode = getComponentNode()
-    const getRenderedNode = getRenderedComponentNode()
+    let getRenderedNode = getRenderedComponentNode()
 
     const port = chrome.runtime.connect({ name: 'svelte-devtools-connection' })
     port.postMessage({
@@ -83,13 +83,8 @@
             'message received in App.svelte from background.js: ',
             msg.componentArr,
           )
-
-          msg.state.forEach((component) => {
-            arrayOfState.push(component.state);
-          });
-
-          renderedComponentsArr = msg.componentArr;
-
+          renderedComponentsArr = msg
+          getRenderedNode = getRenderedComponentNode();
           renderedComponentsArr.forEach((component, index) => {
             // renderedComponents = new ComponentNode(component);
             renderedComponents = getRenderedNode(component, index)
@@ -127,7 +122,7 @@
 
           if (currentComponents[0]) {
             currentComponents[0] = renderedComponents
-            console.log('currentComponents[0]: ', currentComponents[0])
+            // console.log('currentComponents[0]: ', currentComponents[0])
             arr = []
             currentComponents[0].depthFirstPre(cb, arr)
           }
@@ -169,8 +164,8 @@
   ) {
     const node = getNode(component)
     if (node.componentName === 'FeedbackItem') {
-      console.log('node: ', node)
-      console.log('node.children: ', node.children)
+      // console.log('node: ', node)
+      // console.log('node.children: ', node.children)
     }
 
     const children = []
@@ -187,7 +182,7 @@
         )
       ) {
         if (node.componentName === 'FeedbackItem') {
-          console.log('i am a sibling: ', renderedComponentsArr[i])
+          // console.log('i am a sibling: ', renderedComponentsArr[i])
         }
         break
       }
@@ -203,14 +198,14 @@
             )
           ) {
             if (node.componentName === 'FeedbackItem') {
-              console.log(
-                'i am here, node.parents[k]: ',
-                node.parents[k].componentName,
-              )
-              console.log(
-                'i am here, rederendComponentArr[i]: ',
-                renderedComponentsArr[i],
-              )
+              // console.log(
+              //   'i am here, node.parents[k]: ',
+              //   node.parents[k].componentName,
+              // )
+              // console.log(
+              //   'i am here, rederendComponentArr[i]: ',
+              //   renderedComponentsArr[i],
+              // )
             }
             shouldBreak = true
             break
@@ -235,7 +230,7 @@
       }
     }
     if (node.componentName === 'FeedbackItem') {
-      console.log('children: ', children)
+      // console.log('children: ', children)
     }
     return children
   }
@@ -247,7 +242,7 @@
     getNode,
   ) {
     if (component1 === 'FeedbackItem') {
-      console.log('component2: ', component2)
+      // console.log('component2: ', component2)
     }
     if (component1 === component2) return true
     if (getNode(component1).parents && getNode(component2).parents) {

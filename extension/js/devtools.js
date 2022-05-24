@@ -43,7 +43,7 @@ chrome.runtime.onConnect.addListener(port => {
       }
     });
   }
-});
+// });
   // ==========
 
 
@@ -79,4 +79,4 @@ chrome.runtime.onConnect.addListener(port => {
 //       });
 //     }
 //   });
-
+});
