@@ -32674,7 +32674,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (29:4) {#each arr as item, i}
+    // (30:4) {#each arr as item, i}
     function create_each_block(ctx) {
     	let element_1;
     	let div;
@@ -32827,6 +32827,7 @@ var app = (function () {
     	let { handleItemClick } = $$props;
     	let { handleButtonClick } = $$props;
     	let { arr } = $$props;
+    	setTimeout(() => console.log('arr from element tree', arr), 1000);
 
     	$$self.$$set = $$props => {
     		if ('handleItemClick' in $$props) $$invalidate(0, handleItemClick = $$props.handleItemClick);
@@ -33113,7 +33114,7 @@ var app = (function () {
     	};
     }
 
-    // (332:2) {#if showTree}
+    // (338:2) {#if showTree}
     function create_if_block(ctx) {
     	let elementtree;
     	let current;
@@ -33410,10 +33411,6 @@ var app = (function () {
     	return allComponentsParents;
     }
 
-    function cb(str, arr, index, parent) {
-    	arr.push([parent ? parent.componentName : parent, str, index]);
-    }
-
     function updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode) {
     	Object.keys(allComponents).forEach(key => {
     		const node = getNode(key);
@@ -33452,6 +33449,7 @@ var app = (function () {
     	let { arr = [] } = $$props;
     	let { renderedComponentsArr } = $$props;
     	let { renderedComponents } = $$props;
+    	let { arrayOfState = [] } = $$props;
 
     	// chrome.runtime.onMessage.addListener((msg, sender, response) => {
     	//     console.log('arr received onMessage: ', msg);
@@ -33513,8 +33511,13 @@ var app = (function () {
     				});
 
     				portBackground.onMessage.addListener(msg => {
-    					console.log('message received in App.svelte from background.js: ', msg);
-    					$$invalidate(13, renderedComponentsArr = msg);
+    					console.log('message received in App.svelte from background.js: ', msg.componentArr);
+
+    					msg.state.forEach(component => {
+    						arrayOfState.push(component.state);
+    					});
+
+    					$$invalidate(13, renderedComponentsArr = msg.componentArr);
 
     					renderedComponentsArr.forEach((component, index) => {
     						// renderedComponents = new ComponentNode(component);
@@ -33557,12 +33560,13 @@ var app = (function () {
     			this.componentName = componentName;
     			this.parents = [];
     			this.children = [];
+    			this.id;
     			this.depthFirstPre = this.depthFirstPre.bind(this);
     		}
 
     		depthFirstPre(callback, arr, index = 0, parent = null) {
     			let current = this;
-    			callback(current.componentName, arr, index, parent);
+    			callback(current.componentName, arr, index, parent, current.id);
 
     			if (current.children.length) {
     				for (let i = 0; i < current.children.length; i++) {
@@ -33573,6 +33577,10 @@ var app = (function () {
     		}
     	}
 
+    	function cb(str, arr, index, parent, id) {
+    		arr.push([parent ? parent.componentName : parent, str, index, arrayOfState[id]]);
+    	}
+
     	function getRenderedComponentNode() {
     		const componentObj = {};
 
@@ -33580,6 +33588,7 @@ var app = (function () {
     			const key = componentName + id;
     			if (componentObj.hasOwnProperty(key)) return componentObj[key];
     			const node = new ComponentNode(componentName);
+    			node.id = id;
     			return componentObj[key] = node;
     		};
     	}
@@ -33630,6 +33639,7 @@ var app = (function () {
     		if ('arr' in $$props) $$invalidate(0, arr = $$props.arr);
     		if ('renderedComponentsArr' in $$props) $$invalidate(13, renderedComponentsArr = $$props.renderedComponentsArr);
     		if ('renderedComponents' in $$props) $$invalidate(14, renderedComponents = $$props.renderedComponents);
+    		if ('arrayOfState' in $$props) $$invalidate(15, arrayOfState = $$props.arrayOfState);
     		if ('showStores' in $$props) $$invalidate(1, showStores = $$props.showStores);
     		if ('showTree' in $$props) $$invalidate(2, showTree = $$props.showTree);
     		if ('showAbout' in $$props) $$invalidate(3, showAbout = $$props.showAbout);
@@ -33650,7 +33660,8 @@ var app = (function () {
     		headNodes,
     		currentComponents,
     		renderedComponentsArr,
-    		renderedComponents
+    		renderedComponents,
+    		arrayOfState
     	];
     }
 
@@ -33664,6 +33675,7 @@ var app = (function () {
     			arr: 0,
     			renderedComponentsArr: 13,
     			renderedComponents: 14,
+    			arrayOfState: 15,
     			showStores: 1,
     			showTree: 2,
     			showAbout: 3

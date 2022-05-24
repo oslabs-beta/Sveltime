@@ -13,6 +13,7 @@
   export let arr = []
   export let renderedComponentsArr: any
   export let renderedComponents: any
+  export let arrayOfState = [];
 
   // chrome.runtime.onMessage.addListener((msg, sender, response) => {
   //     console.log('arr received onMessage: ', msg);
@@ -80,9 +81,14 @@
         portBackground.onMessage.addListener((msg) => {
           console.log(
             'message received in App.svelte from background.js: ',
-            msg,
+            msg.componentArr,
           )
-          renderedComponentsArr = msg
+
+          msg.state.forEach((component) => {
+            arrayOfState.push(component.state);
+          });
+
+          renderedComponentsArr = msg.componentArr;
 
           renderedComponentsArr.forEach((component, index) => {
             // renderedComponents = new ComponentNode(component);
@@ -280,11 +286,12 @@
       this.componentName = componentName
       this.parents = []
       this.children = []
+      this.id;
       this.depthFirstPre = this.depthFirstPre.bind(this)
     }
     depthFirstPre(callback, arr, index = 0, parent = null) {
       let current = this
-      callback(current.componentName, arr, index, parent)
+      callback(current.componentName, arr, index, parent, current.id)
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
           index += 1
@@ -294,8 +301,8 @@
     }
   }
 
-  function cb(str, arr, index, parent) {
-    arr.push([parent ? parent.componentName : parent, str, index])
+  function cb(str, arr, index, parent, id) {
+    arr.push([parent ? parent.componentName : parent, str, index, arrayOfState[id]])
   }
 
   function getRenderedComponentNode() {
@@ -305,6 +312,7 @@
       const key = componentName + id
       if (componentObj.hasOwnProperty(key)) return componentObj[key]
       const node = new ComponentNode(componentName)
+      node.id = id;
       return (componentObj[key] = node)
     }
   }

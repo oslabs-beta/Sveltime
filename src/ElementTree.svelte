@@ -3,6 +3,7 @@
   export let handleItemClick
   export let handleButtonClick
   export let arr
+  setTimeout(()=> console.log('arr from element tree', arr), 1000);
 </script>
 
 <style>
