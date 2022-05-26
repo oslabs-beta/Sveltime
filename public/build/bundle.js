@@ -32370,9 +32370,9 @@ var app = (function () {
     			p1 = element("p");
     			t3 = text$1("Data: ");
     			t4 = text$1(/*data*/ ctx[1]);
-    			attr(p0, "class", "svelte-16a5zkz");
-    			attr(p1, "class", "svelte-16a5zkz");
-    			attr(div, "class", "store svelte-16a5zkz");
+    			attr(p0, "class", "svelte-3q7ly3");
+    			attr(p1, "class", "svelte-3q7ly3");
+    			attr(div, "class", "store svelte-3q7ly3");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32586,9 +32586,9 @@ var app = (function () {
     			t1 = space();
     			button = element("button");
     			button.textContent = "+";
-    			attr(p, "class", "svelte-lucznc");
-    			attr(button, "class", "showBtn svelte-lucznc");
-    			attr(div, "class", "componentItem svelte-lucznc");
+    			attr(p, "class", "svelte-ezztfm");
+    			attr(button, "class", "showBtn svelte-ezztfm");
+    			attr(div, "class", "componentItem svelte-ezztfm");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
