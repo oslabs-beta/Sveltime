@@ -372,13 +372,15 @@
       console.log('arr after toggle children: ', arr)
     }
   }
+
+  //
   function handleButtonClick(e) {
     console.log('button click: ', e.target)
   }
   function handleStoreClick(e) {
     console.log('store click: ', e.target)
   }
-  export let showStores = true
+  export let showStores = false
   export let showTree = true
   export let showAbout = true
 

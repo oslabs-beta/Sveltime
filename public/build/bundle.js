@@ -32572,11 +32572,7 @@ var app = (function () {
     	let t3;
     	let t4_value = /*currentNode*/ ctx[2].visibility + "";
     	let t4;
-    	let t5;
-    	let p2;
-    	let t6;
-    	let t7_value = /*currentNode*/ ctx[2].override + "";
-    	let t7;
+    	let div_class_value;
     	let mounted;
     	let dispose;
 
@@ -32590,14 +32586,12 @@ var app = (function () {
     			p1 = element("p");
     			t3 = text$1("current Node vis: ");
     			t4 = text$1(t4_value);
-    			t5 = space();
-    			p2 = element("p");
-    			t6 = text$1("override: ");
-    			t7 = text$1(t7_value);
-    			attr(p0, "class", "svelte-11hm1jt");
-    			attr(p1, "class", "svelte-11hm1jt");
-    			attr(p2, "class", "svelte-11hm1jt");
-    			attr(div, "class", "componentItem svelte-11hm1jt");
+    			attr(p0, "class", "svelte-1lt5j74");
+    			attr(p1, "class", "svelte-1lt5j74");
+
+    			attr(div, "class", div_class_value = "" + (null_to_empty(/*currentNode*/ ctx[2].visibility
+    			? 'componentItem'
+    			: 'componentItem hidden') + " svelte-1lt5j74"));
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32608,10 +32602,6 @@ var app = (function () {
     			append(div, p1);
     			append(p1, t3);
     			append(p1, t4);
-    			append(div, t5);
-    			append(div, p2);
-    			append(p2, t6);
-    			append(p2, t7);
 
     			if (!mounted) {
     				dispose = listen(div, "click", /*click_handler*/ ctx[8]);
@@ -32621,7 +32611,12 @@ var app = (function () {
     		p(ctx, [dirty]) {
     			if (dirty & /*name*/ 1) set_data(t1, /*name*/ ctx[0]);
     			if (dirty & /*currentNode*/ 4 && t4_value !== (t4_value = /*currentNode*/ ctx[2].visibility + "")) set_data(t4, t4_value);
-    			if (dirty & /*currentNode*/ 4 && t7_value !== (t7_value = /*currentNode*/ ctx[2].override + "")) set_data(t7, t7_value);
+
+    			if (dirty & /*currentNode*/ 4 && div_class_value !== (div_class_value = "" + (null_to_empty(/*currentNode*/ ctx[2].visibility
+    			? 'componentItem'
+    			: 'componentItem hidden') + " svelte-1lt5j74"))) {
+    				attr(div, "class", div_class_value);
+    			}
     		},
     		i: noop$2,
     		o: noop$2,
@@ -33137,7 +33132,7 @@ var app = (function () {
     	};
     }
 
-    // (365:2) {#if showTree}
+    // (366:2) {#if showTree}
     function create_if_block(ctx) {
     	let elementtree;
     	let current;
@@ -33458,6 +33453,7 @@ var app = (function () {
     	return headNodes;
     }
 
+    //
     function handleButtonClick(e) {
     	console.log('button click: ', e.target);
     }
@@ -33640,7 +33636,7 @@ var app = (function () {
     		}
     	}
 
-    	let { showStores = true } = $$props;
+    	let { showStores = false } = $$props;
     	let { showTree = true } = $$props;
     	let { showAbout = true } = $$props;
 
