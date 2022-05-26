@@ -53,13 +53,6 @@ var app = (function () {
         node.addEventListener(event, handler, options);
         return () => node.removeEventListener(event, handler, options);
     }
-    function stop_propagation(fn) {
-        return function (event) {
-            event.stopPropagation();
-            // @ts-ignore
-            return fn.call(this, event);
-        };
-    }
     function attr(node, attribute, value) {
         if (value == null)
             node.removeAttribute(attribute);
@@ -32571,50 +32564,71 @@ var app = (function () {
 
     function create_fragment$4(ctx) {
     	let div;
-    	let p;
+    	let p0;
     	let t0;
     	let t1;
-    	let button;
+    	let t2;
+    	let p1;
+    	let t3;
+    	let t4_value = /*currentNode*/ ctx[2].visibility + "";
+    	let t4;
+    	let t5;
+    	let p2;
+    	let t6;
+    	let t7_value = /*currentNode*/ ctx[2].override + "";
+    	let t7;
     	let mounted;
     	let dispose;
 
     	return {
     		c() {
     			div = element("div");
-    			p = element("p");
-    			t0 = text$1(/*name*/ ctx[0]);
-    			t1 = space();
-    			button = element("button");
-    			button.textContent = "+";
-    			attr(p, "class", "svelte-11hm1jt");
-    			attr(button, "class", "showBtn svelte-11hm1jt");
+    			p0 = element("p");
+    			t0 = text$1("name: ");
+    			t1 = text$1(/*name*/ ctx[0]);
+    			t2 = space();
+    			p1 = element("p");
+    			t3 = text$1("current Node vis: ");
+    			t4 = text$1(t4_value);
+    			t5 = space();
+    			p2 = element("p");
+    			t6 = text$1("override: ");
+    			t7 = text$1(t7_value);
+    			attr(p0, "class", "svelte-11hm1jt");
+    			attr(p1, "class", "svelte-11hm1jt");
+    			attr(p2, "class", "svelte-11hm1jt");
     			attr(div, "class", "componentItem svelte-11hm1jt");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
-    			append(div, p);
-    			append(p, t0);
-    			append(div, t1);
-    			append(div, button);
+    			append(div, p0);
+    			append(p0, t0);
+    			append(p0, t1);
+    			append(div, t2);
+    			append(div, p1);
+    			append(p1, t3);
+    			append(p1, t4);
+    			append(div, t5);
+    			append(div, p2);
+    			append(p2, t6);
+    			append(p2, t7);
 
     			if (!mounted) {
-    				dispose = [
-    					listen(button, "click", stop_propagation(/*click_handler*/ ctx[6])),
-    					listen(div, "click", /*click_handler_1*/ ctx[7])
-    				];
-
+    				dispose = listen(div, "click", /*click_handler*/ ctx[8]);
     				mounted = true;
     			}
     		},
     		p(ctx, [dirty]) {
-    			if (dirty & /*name*/ 1) set_data(t0, /*name*/ ctx[0]);
+    			if (dirty & /*name*/ 1) set_data(t1, /*name*/ ctx[0]);
+    			if (dirty & /*currentNode*/ 4 && t4_value !== (t4_value = /*currentNode*/ ctx[2].visibility + "")) set_data(t4, t4_value);
+    			if (dirty & /*currentNode*/ 4 && t7_value !== (t7_value = /*currentNode*/ ctx[2].override + "")) set_data(t7, t7_value);
     		},
     		i: noop$2,
     		o: noop$2,
     		d(detaching) {
     			if (detaching) detach(div);
     			mounted = false;
-    			run_all(dispose);
+    			dispose();
     		}
     	};
     }
@@ -32624,29 +32638,33 @@ var app = (function () {
     	let { name } = $$props;
     	let { elemId } = $$props;
     	let { handleItemClick } = $$props;
-    	let { handleButtonClick } = $$props;
     	let { key } = $$props;
-    	const click_handler = key => handleButtonClick(key);
-    	const click_handler_1 = () => handleItemClick();
+    	let { boolean } = $$props;
+    	let { currentNode } = $$props;
+    	let { override } = $$props;
+    	const click_handler = e => handleItemClick(currentNode);
 
     	$$self.$$set = $$props => {
     		if ('parent' in $$props) $$invalidate(3, parent = $$props.parent);
     		if ('name' in $$props) $$invalidate(0, name = $$props.name);
     		if ('elemId' in $$props) $$invalidate(4, elemId = $$props.elemId);
     		if ('handleItemClick' in $$props) $$invalidate(1, handleItemClick = $$props.handleItemClick);
-    		if ('handleButtonClick' in $$props) $$invalidate(2, handleButtonClick = $$props.handleButtonClick);
     		if ('key' in $$props) $$invalidate(5, key = $$props.key);
+    		if ('boolean' in $$props) $$invalidate(6, boolean = $$props.boolean);
+    		if ('currentNode' in $$props) $$invalidate(2, currentNode = $$props.currentNode);
+    		if ('override' in $$props) $$invalidate(7, override = $$props.override);
     	};
 
     	return [
     		name,
     		handleItemClick,
-    		handleButtonClick,
+    		currentNode,
     		parent,
     		elemId,
     		key,
-    		click_handler,
-    		click_handler_1
+    		boolean,
+    		override,
+    		click_handler
     	];
     }
 
@@ -32659,8 +32677,10 @@ var app = (function () {
     			name: 0,
     			elemId: 4,
     			handleItemClick: 1,
-    			handleButtonClick: 2,
-    			key: 5
+    			key: 5,
+    			boolean: 6,
+    			currentNode: 2,
+    			override: 7
     		});
     	}
     }
@@ -32687,6 +32707,8 @@ var app = (function () {
     				parent: /*item*/ ctx[3][0],
     				elemId: /*item*/ ctx[3][2],
     				key: /*i*/ ctx[5],
+    				override: /*item*/ ctx[3][3],
+    				currentNode: /*item*/ ctx[3][4],
     				handleItemClick: /*handleItemClick*/ ctx[0],
     				handleButtonClick: /*handleButtonClick*/ ctx[1]
     			}
@@ -32713,6 +32735,8 @@ var app = (function () {
     			if (dirty & /*arr*/ 4) element_1_changes.name = /*item*/ ctx[3][1];
     			if (dirty & /*arr*/ 4) element_1_changes.parent = /*item*/ ctx[3][0];
     			if (dirty & /*arr*/ 4) element_1_changes.elemId = /*item*/ ctx[3][2];
+    			if (dirty & /*arr*/ 4) element_1_changes.override = /*item*/ ctx[3][3];
+    			if (dirty & /*arr*/ 4) element_1_changes.currentNode = /*item*/ ctx[3][4];
     			if (dirty & /*handleItemClick*/ 1) element_1_changes.handleItemClick = /*handleItemClick*/ ctx[0];
     			if (dirty & /*handleButtonClick*/ 2) element_1_changes.handleButtonClick = /*handleButtonClick*/ ctx[1];
     			element_1.$set(element_1_changes);
@@ -33087,7 +33111,7 @@ var app = (function () {
     function create_if_block_1(ctx) {
     	let allstores;
     	let current;
-    	allstores = new AllStores({ props: { storeArr: /*storeArr*/ ctx[8] } });
+    	allstores = new AllStores({ props: { storeArr: /*storeArr*/ ctx[9] } });
 
     	return {
     		c() {
@@ -33113,7 +33137,7 @@ var app = (function () {
     	};
     }
 
-    // (339:2) {#if showTree}
+    // (365:2) {#if showTree}
     function create_if_block(ctx) {
     	let elementtree;
     	let current;
@@ -33121,7 +33145,7 @@ var app = (function () {
     	elementtree = new ElementTree({
     			props: {
     				arr: /*arr*/ ctx[0],
-    				handleItemClick,
+    				handleItemClick: /*handleItemClick*/ ctx[5],
     				handleButtonClick
     			}
     		});
@@ -33165,14 +33189,14 @@ var app = (function () {
 
     	navbar = new Navbar({
     			props: {
-    				handleShowStores: /*handleShowStores*/ ctx[5],
-    				handleShowTree: /*handleShowTree*/ ctx[6],
-    				handleShowAbout: /*handleShowAbout*/ ctx[7],
+    				handleShowStores: /*handleShowStores*/ ctx[6],
+    				handleShowTree: /*handleShowTree*/ ctx[7],
+    				handleShowAbout: /*handleShowAbout*/ ctx[8],
     				showStores: /*showStores*/ ctx[1],
     				showTree: /*showTree*/ ctx[2],
     				showAbout: /*showAbout*/ ctx[3],
-    				openModal: /*openModal*/ ctx[9],
-    				closeModal: /*closeModal*/ ctx[10],
+    				openModal: /*openModal*/ ctx[10],
+    				closeModal: /*closeModal*/ ctx[11],
     				isOpenModal: /*isOpenModal*/ ctx[4]
     			}
     		});
@@ -33181,7 +33205,7 @@ var app = (function () {
     			props: { isOpenModal: /*isOpenModal*/ ctx[4] }
     		});
 
-    	modal.$on("closeModal", /*closeModal*/ ctx[10]);
+    	modal.$on("closeModal", /*closeModal*/ ctx[11]);
     	let if_block0 = /*showStores*/ ctx[1] && create_if_block_1(ctx);
     	let if_block1 = /*showTree*/ ctx[2] && create_if_block(ctx);
 
@@ -33406,8 +33430,8 @@ var app = (function () {
     	return allComponentsParents;
     }
 
-    function cb(str, arr, index, parent) {
-    	arr.push([parent ? parent.componentName : parent, str, index]);
+    function cb(str, arr, index, parent, currentNode) {
+    	arr.push([parent ? parent.componentName : parent, str, index, true, currentNode]);
     }
 
     function updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode) {
@@ -33432,10 +33456,6 @@ var app = (function () {
     	});
 
     	return headNodes;
-    }
-
-    function handleItemClick() {
-    	console.log('item click: ');
     }
 
     function handleButtonClick(e) {
@@ -33497,10 +33517,10 @@ var app = (function () {
     				const allComponentsParents = createParentObj(allComponents);
 
     				// console.log('allComponentsParents: ', allComponentsParents)
-    				$$invalidate(11, headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode));
+    				$$invalidate(12, headNodes = updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode));
 
     				console.log('headNodes: ', headNodes);
-    				$$invalidate(12, currentComponents = headNodes);
+    				$$invalidate(13, currentComponents = headNodes);
     				const portBackground = chrome.runtime.connect({ name: 'svelte-background-connection' });
 
     				portBackground.postMessage({
@@ -33510,20 +33530,20 @@ var app = (function () {
 
     				portBackground.onMessage.addListener(msg => {
     					console.log('message received in App.svelte from background.js: ', msg);
-    					$$invalidate(13, renderedComponentsArr = msg);
+    					$$invalidate(14, renderedComponentsArr = msg);
     					getRenderedNode = getRenderedComponentNode();
 
     					renderedComponentsArr.forEach((component, index) => {
     						// renderedComponents = new ComponentNode(component);
-    						$$invalidate(14, renderedComponents = getRenderedNode(component, index));
+    						$$invalidate(15, renderedComponents = getRenderedNode(component, index));
 
     						const parent = getRenderedComponentParent(renderedComponentsArr, component, index, getNode);
 
     						if (parent) {
     							// renderedComponents.parents = [new ComponentNode(parent)];
-    							$$invalidate(14, renderedComponents.parents = [getRenderedNode(parent[0], parent[1])], renderedComponents);
+    							$$invalidate(15, renderedComponents.parents = [getRenderedNode(parent[0], parent[1])], renderedComponents);
     						} else {
-    							$$invalidate(14, renderedComponents.parents = null, renderedComponents);
+    							$$invalidate(15, renderedComponents.parents = null, renderedComponents);
     						}
 
     						const children = getRenderedComponentChildren(renderedComponentsArr, component, index, getNode, getRenderedNode);
@@ -33539,7 +33559,7 @@ var app = (function () {
     					console.log('renderedComponents: ', renderedComponents);
 
     					if (currentComponents[0]) {
-    						$$invalidate(12, currentComponents[0] = renderedComponents, currentComponents);
+    						$$invalidate(13, currentComponents[0] = renderedComponents, currentComponents);
 
     						// console.log('currentComponents[0]: ', currentComponents[0])
     						$$invalidate(0, arr = []);
@@ -33556,17 +33576,31 @@ var app = (function () {
     			this.componentName = componentName;
     			this.parents = [];
     			this.children = [];
+    			this.visibility = true;
+    			this.overrride = false;
     			this.depthFirstPre = this.depthFirstPre.bind(this);
+    			this.toggleChildrenVisibility = this.toggleChildrenVisibility.bind(this);
     		}
 
     		depthFirstPre(callback, arr, index = 0, parent = null) {
     			let current = this;
-    			callback(current.componentName, arr, index, parent);
+    			callback(current.componentName, arr, index, parent, current);
 
     			if (current.children.length) {
     				for (let i = 0; i < current.children.length; i++) {
     					index += 1;
     					current.children[i].depthFirstPre(callback, arr, index - i, current);
+    				}
+    			}
+    		}
+
+    		toggleChildrenVisibility(node) {
+    			let current = this;
+
+    			if (current.children.length) {
+    				for (let i = 0; i < current.children.length; i++) {
+    					current.children[i].visibility = !node.visibility;
+    					current.children[i].toggleChildrenVisibility(node);
     				}
     			}
     		}
@@ -33591,6 +33625,19 @@ var app = (function () {
     			const node = new ComponentNode(componentName);
     			return componentObj[componentName] = node;
     		};
+    	}
+
+    	function handleItemClick(node) {
+    		console.log('item click: ', node);
+    		node.toggleChildrenVisibility(node);
+    		node.override = !node.override;
+    		node.visibility = !node.visibility;
+
+    		if (currentComponents[0]) {
+    			$$invalidate(0, arr = []);
+    			currentComponents[0].depthFirstPre(cb, arr);
+    			console.log('arr after toggle children: ', arr);
+    		}
     	}
 
     	let { showStores = true } = $$props;
@@ -33624,11 +33671,11 @@ var app = (function () {
     	}
 
     	$$self.$$set = $$props => {
-    		if ('headNodes' in $$props) $$invalidate(11, headNodes = $$props.headNodes);
-    		if ('currentComponents' in $$props) $$invalidate(12, currentComponents = $$props.currentComponents);
+    		if ('headNodes' in $$props) $$invalidate(12, headNodes = $$props.headNodes);
+    		if ('currentComponents' in $$props) $$invalidate(13, currentComponents = $$props.currentComponents);
     		if ('arr' in $$props) $$invalidate(0, arr = $$props.arr);
-    		if ('renderedComponentsArr' in $$props) $$invalidate(13, renderedComponentsArr = $$props.renderedComponentsArr);
-    		if ('renderedComponents' in $$props) $$invalidate(14, renderedComponents = $$props.renderedComponents);
+    		if ('renderedComponentsArr' in $$props) $$invalidate(14, renderedComponentsArr = $$props.renderedComponentsArr);
+    		if ('renderedComponents' in $$props) $$invalidate(15, renderedComponents = $$props.renderedComponents);
     		if ('showStores' in $$props) $$invalidate(1, showStores = $$props.showStores);
     		if ('showTree' in $$props) $$invalidate(2, showTree = $$props.showTree);
     		if ('showAbout' in $$props) $$invalidate(3, showAbout = $$props.showAbout);
@@ -33640,6 +33687,7 @@ var app = (function () {
     		showTree,
     		showAbout,
     		isOpenModal,
+    		handleItemClick,
     		handleShowStores,
     		handleShowTree,
     		handleShowAbout,
@@ -33658,11 +33706,11 @@ var app = (function () {
     		super();
 
     		init(this, options, instance, create_fragment, safe_not_equal, {
-    			headNodes: 11,
-    			currentComponents: 12,
+    			headNodes: 12,
+    			currentComponents: 13,
     			arr: 0,
-    			renderedComponentsArr: 13,
-    			renderedComponents: 14,
+    			renderedComponentsArr: 14,
+    			renderedComponents: 15,
     			showStores: 1,
     			showTree: 2,
     			showAbout: 3

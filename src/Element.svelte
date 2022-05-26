@@ -3,8 +3,12 @@
   export let name
   export let elemId
   export let handleItemClick
-  export let handleButtonClick
+  // export let handleButtonClick
   export let key
+  export let boolean
+  export let currentNode
+  export let override
+  // export let parentBoolean
 </script>
 
 <style>
@@ -38,11 +42,21 @@
   }
 </style>
 
-<div class="componentItem" on:click={() => handleItemClick()}>
-  <p>{name}</p>
-  <button
+<div class="componentItem" on:click={(e) => handleItemClick(currentNode)}>
+  <p>name: {name}</p>
+  <p>current Node vis: {currentNode.visibility}</p>
+  <p>override: {currentNode.override}</p>
+  <!-- <p>visibility: {currentNodeVisibility}</p> -->
+
+  <!-- <p>parent: {parent}</p>
+  <p>elemId: {elemId}</p>
+  <p>key: {key}</p>
+  <p>boolean{boolean}</p>
+  <p>currentNode: {currentNode}</p> -->
+
+  <!-- <button
     class="showBtn"
     on:click|stopPropagation={(key) => handleButtonClick(key)}>
     +
-  </button>
+  </button> -->
 </div>

@@ -32,6 +32,8 @@
         parent={item[0]}
         elemId={item[2]}
         key={i}
+        override={item[3]}
+        currentNode={item[4]}
         {handleItemClick}
         {handleButtonClick}
         --leftMargin="{item[2] * 3}rem" />

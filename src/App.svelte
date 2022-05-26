@@ -83,7 +83,7 @@
             msg,
           )
           renderedComponentsArr = msg
-          getRenderedNode = getRenderedComponentNode();
+          getRenderedNode = getRenderedComponentNode()
           renderedComponentsArr.forEach((component, index) => {
             // renderedComponents = new ComponentNode(component);
             renderedComponents = getRenderedNode(component, index)
@@ -280,11 +280,14 @@
       this.componentName = componentName
       this.parents = []
       this.children = []
+      this.visibility = true
+      this.overrride = false
       this.depthFirstPre = this.depthFirstPre.bind(this)
+      this.toggleChildrenVisibility = this.toggleChildrenVisibility.bind(this)
     }
     depthFirstPre(callback, arr, index = 0, parent = null) {
       let current = this
-      callback(current.componentName, arr, index, parent)
+      callback(current.componentName, arr, index, parent, current)
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
           index += 1
@@ -292,10 +295,25 @@
         }
       }
     }
+    toggleChildrenVisibility(node) {
+      let current = this
+      if (current.children.length) {
+        for (let i = 0; i < current.children.length; i++) {
+          current.children[i].visibility = !node.visibility
+          current.children[i].toggleChildrenVisibility(node)
+        }
+      }
+    }
   }
 
-  function cb(str, arr, index, parent) {
-    arr.push([parent ? parent.componentName : parent, str, index])
+  function cb(str, arr, index, parent, currentNode) {
+    arr.push([
+      parent ? parent.componentName : parent,
+      str,
+      index,
+      true,
+      currentNode,
+    ])
   }
 
   function getRenderedComponentNode() {
@@ -343,8 +361,16 @@
     return headNodes
   }
 
-  function handleItemClick() {
-    console.log('item click: ')
+  function handleItemClick(node) {
+    console.log('item click: ', node)
+    node.toggleChildrenVisibility(node)
+    node.override = !node.override
+    node.visibility = !node.visibility
+    if (currentComponents[0]) {
+      arr = []
+      currentComponents[0].depthFirstPre(cb, arr)
+      console.log('arr after toggle children: ', arr)
+    }
   }
   function handleButtonClick(e) {
     console.log('button click: ', e.target)
