@@ -1,5 +1,5 @@
 
-(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
+(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35730/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
 var app = (function () {
     'use strict';
 
@@ -32370,9 +32370,9 @@ var app = (function () {
     			p1 = element("p");
     			t3 = text$1("Data: ");
     			t4 = text$1(/*data*/ ctx[1]);
-    			attr(p0, "class", "svelte-15ddgnw");
-    			attr(p1, "class", "svelte-15ddgnw");
-    			attr(div, "class", "store svelte-15ddgnw");
+    			attr(p0, "class", "svelte-16a5zkz");
+    			attr(p1, "class", "svelte-16a5zkz");
+    			attr(div, "class", "store svelte-16a5zkz");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32424,7 +32424,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (26:2) {#each storeArr as store, i}
+    // (27:2) {#each storeArr as store, i}
     function create_each_block$1(ctx) {
     	let onestore;
     	let current;
@@ -32486,7 +32486,7 @@ var app = (function () {
     				each_blocks[i].c();
     			}
 
-    			attr(div, "class", "allStores svelte-1p5xa2o");
+    			attr(div, "class", "allStores svelte-gu2pyf");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32586,9 +32586,9 @@ var app = (function () {
     			t1 = space();
     			button = element("button");
     			button.textContent = "+";
-    			attr(p, "class", "svelte-11hm1jt");
-    			attr(button, "class", "showBtn svelte-11hm1jt");
-    			attr(div, "class", "componentItem svelte-11hm1jt");
+    			attr(p, "class", "svelte-lucznc");
+    			attr(button, "class", "showBtn svelte-lucznc");
+    			attr(div, "class", "componentItem svelte-lucznc");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32697,7 +32697,7 @@ var app = (function () {
     			div = element("div");
     			create_component(element_1.$$.fragment);
     			set_style(div, "display", "contents");
-    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[3][2] * 3 + "rem"));
+    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.5 + "rem"));
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32705,7 +32705,7 @@ var app = (function () {
     			current = true;
     		},
     		p(ctx, dirty) {
-    			if (dirty & /*arr*/ 4 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[3][2] * 3 + "rem"))) {
+    			if (dirty & /*arr*/ 4 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.5 + "rem"))) {
     				set_style(div, "--leftMargin", __leftMargin_last);
     			}
 
@@ -32757,8 +32757,8 @@ var app = (function () {
     				each_blocks[i].c();
     			}
 
-    			attr(div0, "class", "elementTree svelte-w13aeq");
-    			attr(div1, "class", "container svelte-w13aeq");
+    			attr(div0, "class", "elementTree svelte-yvv3hx");
+    			attr(div1, "class", "container svelte-yvv3hx");
     		},
     		m(target, anchor) {
     			insert(target, div1, anchor);
@@ -33003,7 +33003,10 @@ var app = (function () {
     function create_fragment$1(ctx) {
     	let div0;
     	let t0;
+    	let div2;
     	let div1;
+    	let button;
+    	let t1;
     	let h2;
     	let mounted;
     	let dispose;
@@ -33012,29 +33015,42 @@ var app = (function () {
     		c() {
     			div0 = element("div");
     			t0 = space();
+    			div2 = element("div");
     			div1 = element("div");
+    			button = element("button");
+    			t1 = space();
     			h2 = element("h2");
 
     			h2.innerHTML = `Thank you for using Sveltime, a unique tool that lets Svelte developers
-    examine not just the components that make up their sites, but view changes
-    to state, and analyze render times. Please visit our GitHub page:
-    <a href="https://github.com/oslabs-beta/Sveltime" target="_blank">Sveltime</a>`;
+      examine not just the components that make up their sites, but view changes
+      to state, and analyze render times. Please visit our GitHub page:
+      <a href="https://github.com/oslabs-beta/Sveltime" target="_blank">Sveltime</a>`;
 
     			attr(div0, "id", "background");
     			set_style(div0, "--display", /*isOpenModal*/ ctx[0] ? 'block' : 'none');
-    			attr(div0, "class", "svelte-hcea22");
-    			attr(div1, "id", "modal");
-    			set_style(div1, "--display", /*isOpenModal*/ ctx[0] ? 'block' : 'none');
-    			attr(div1, "class", "svelte-hcea22");
+    			attr(div0, "class", "svelte-66upvz");
+    			attr(button, "class", "close svelte-66upvz");
+    			attr(div1, "id", "container");
+    			attr(div1, "class", "svelte-66upvz");
+    			attr(div2, "id", "modal");
+    			set_style(div2, "--display", /*isOpenModal*/ ctx[0] ? 'block' : 'none');
+    			attr(div2, "class", "svelte-66upvz");
     		},
     		m(target, anchor) {
     			insert(target, div0, anchor);
     			insert(target, t0, anchor);
-    			insert(target, div1, anchor);
+    			insert(target, div2, anchor);
+    			append(div2, div1);
+    			append(div1, button);
+    			append(div1, t1);
     			append(div1, h2);
 
     			if (!mounted) {
-    				dispose = listen(div0, "click", /*closeModal*/ ctx[1]);
+    				dispose = [
+    					listen(div0, "click", /*closeModal*/ ctx[1]),
+    					listen(button, "click", /*closeModal*/ ctx[1])
+    				];
+
     				mounted = true;
     			}
     		},
@@ -33044,7 +33060,7 @@ var app = (function () {
     			}
 
     			if (dirty & /*isOpenModal*/ 1) {
-    				set_style(div1, "--display", /*isOpenModal*/ ctx[0] ? 'block' : 'none');
+    				set_style(div2, "--display", /*isOpenModal*/ ctx[0] ? 'block' : 'none');
     			}
     		},
     		i: noop$2,
@@ -33052,9 +33068,9 @@ var app = (function () {
     		d(detaching) {
     			if (detaching) detach(div0);
     			if (detaching) detach(t0);
-    			if (detaching) detach(div1);
+    			if (detaching) detach(div2);
     			mounted = false;
-    			dispose();
+    			run_all(dispose);
     		}
     	};
     }

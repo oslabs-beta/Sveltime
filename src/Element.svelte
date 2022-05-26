@@ -24,17 +24,19 @@
     /* border: 2px solid brown; */
     cursor: pointer;
     margin-left: var(--leftMargin, 4rem);
-    min-width: 60%;
-    width: 260px;
+    width: 60%;
   }
   .showBtn {
     border-radius: 20px 20px;
-    background-color: orange;
+    background-color: rgba(255, 166, 0, 0.80);
     cursor: pointer;
     color: black;
   }
   p {
     letter-spacing: 0.75px;
+  }
+  button {
+    border: none;
   }
 </style>
 

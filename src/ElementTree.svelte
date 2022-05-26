@@ -10,12 +10,12 @@
     height: 100vh;
     width: 100%;
     min-width: 55vw;
-    background-color: rgb(52, 54, 62);
+    /* background-color: rgb(52, 54, 62); */
+    background-color: #121212;
     padding-top: 45px;
     border-left: 2px solid rgb(115, 117, 126);
     display: flex;
     flex-direction: column;
-    align-items: center;
   }
   .elementTree {
     width: 80%;
@@ -34,7 +34,7 @@
         key={i}
         {handleItemClick}
         {handleButtonClick}
-        --leftMargin="{item[2] * 3}rem" />
+        --leftMargin="{item[2] * 2.5}rem" />
     {/each}
   </div>
 </div>
