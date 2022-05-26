@@ -295,12 +295,14 @@
         }
       }
     }
-    toggleChildrenVisibility(node) {
+
+    toggleChildrenVisibility(node, initialVisibility) {
       let current = this
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
-          current.children[i].visibility = !node.visibility
-          current.children[i].toggleChildrenVisibility(node)
+          ///PETER CHANGED !node.visibility to !current.children[i].visibility
+          current.children[i].visibility = !initialVisibility
+          current.children[i].toggleChildrenVisibility(node, initialVisibility)
         }
       }
     }
@@ -363,9 +365,14 @@
 
   function handleItemClick(node) {
     console.log('item click: ', node)
-    node.toggleChildrenVisibility(node)
-    node.override = !node.override
-    node.visibility = !node.visibility
+    let initialVisibility = true
+    if (node.children.length) {
+      initialVisibility = node.children[0].visibility
+    }
+    node.toggleChildrenVisibility(node, initialVisibility)
+    //PETER COMMENTED OUT THE NEXT TWO LINES OF CODE
+    // node.override = !node.override
+    // node.visibility = !node.visibility
     if (currentComponents[0]) {
       arr = []
       currentComponents[0].depthFirstPre(cb, arr)

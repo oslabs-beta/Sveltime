@@ -32586,12 +32586,12 @@ var app = (function () {
     			p1 = element("p");
     			t3 = text$1("current Node vis: ");
     			t4 = text$1(t4_value);
-    			attr(p0, "class", "svelte-1lt5j74");
-    			attr(p1, "class", "svelte-1lt5j74");
+    			attr(p0, "class", "svelte-1hov6bj");
+    			attr(p1, "class", "svelte-1hov6bj");
 
     			attr(div, "class", div_class_value = "" + (null_to_empty(/*currentNode*/ ctx[2].visibility
     			? 'componentItem'
-    			: 'componentItem hidden') + " svelte-1lt5j74"));
+    			: 'componentItem hidden') + " svelte-1hov6bj"));
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32604,7 +32604,7 @@ var app = (function () {
     			append(p1, t4);
 
     			if (!mounted) {
-    				dispose = listen(div, "click", /*click_handler*/ ctx[8]);
+    				dispose = listen(div, "click", /*click_handler*/ ctx[7]);
     				mounted = true;
     			}
     		},
@@ -32614,7 +32614,7 @@ var app = (function () {
 
     			if (dirty & /*currentNode*/ 4 && div_class_value !== (div_class_value = "" + (null_to_empty(/*currentNode*/ ctx[2].visibility
     			? 'componentItem'
-    			: 'componentItem hidden') + " svelte-1lt5j74"))) {
+    			: 'componentItem hidden') + " svelte-1hov6bj"))) {
     				attr(div, "class", div_class_value);
     			}
     		},
@@ -32636,8 +32636,7 @@ var app = (function () {
     	let { key } = $$props;
     	let { boolean } = $$props;
     	let { currentNode } = $$props;
-    	let { override } = $$props;
-    	const click_handler = e => handleItemClick(currentNode);
+    	const click_handler = () => handleItemClick(currentNode);
 
     	$$self.$$set = $$props => {
     		if ('parent' in $$props) $$invalidate(3, parent = $$props.parent);
@@ -32647,7 +32646,6 @@ var app = (function () {
     		if ('key' in $$props) $$invalidate(5, key = $$props.key);
     		if ('boolean' in $$props) $$invalidate(6, boolean = $$props.boolean);
     		if ('currentNode' in $$props) $$invalidate(2, currentNode = $$props.currentNode);
-    		if ('override' in $$props) $$invalidate(7, override = $$props.override);
     	};
 
     	return [
@@ -32658,7 +32656,6 @@ var app = (function () {
     		elemId,
     		key,
     		boolean,
-    		override,
     		click_handler
     	];
     }
@@ -32674,8 +32671,7 @@ var app = (function () {
     			handleItemClick: 1,
     			key: 5,
     			boolean: 6,
-    			currentNode: 2,
-    			override: 7
+    			currentNode: 2
     		});
     	}
     }
@@ -32702,7 +32698,6 @@ var app = (function () {
     				parent: /*item*/ ctx[3][0],
     				elemId: /*item*/ ctx[3][2],
     				key: /*i*/ ctx[5],
-    				override: /*item*/ ctx[3][3],
     				currentNode: /*item*/ ctx[3][4],
     				handleItemClick: /*handleItemClick*/ ctx[0],
     				handleButtonClick: /*handleButtonClick*/ ctx[1]
@@ -32730,7 +32725,6 @@ var app = (function () {
     			if (dirty & /*arr*/ 4) element_1_changes.name = /*item*/ ctx[3][1];
     			if (dirty & /*arr*/ 4) element_1_changes.parent = /*item*/ ctx[3][0];
     			if (dirty & /*arr*/ 4) element_1_changes.elemId = /*item*/ ctx[3][2];
-    			if (dirty & /*arr*/ 4) element_1_changes.override = /*item*/ ctx[3][3];
     			if (dirty & /*arr*/ 4) element_1_changes.currentNode = /*item*/ ctx[3][4];
     			if (dirty & /*handleItemClick*/ 1) element_1_changes.handleItemClick = /*handleItemClick*/ ctx[0];
     			if (dirty & /*handleButtonClick*/ 2) element_1_changes.handleButtonClick = /*handleButtonClick*/ ctx[1];
@@ -33132,7 +33126,7 @@ var app = (function () {
     	};
     }
 
-    // (366:2) {#if showTree}
+    // (372:2) {#if showTree}
     function create_if_block(ctx) {
     	let elementtree;
     	let current;
@@ -33590,13 +33584,15 @@ var app = (function () {
     			}
     		}
 
-    		toggleChildrenVisibility(node) {
+    		toggleChildrenVisibility(node, initialVisibility) {
     			let current = this;
 
     			if (current.children.length) {
     				for (let i = 0; i < current.children.length; i++) {
-    					current.children[i].visibility = !node.visibility;
-    					current.children[i].toggleChildrenVisibility(node);
+    					///PETER CHANGED !node.visibility to !current.children[i].visibility
+    					current.children[i].visibility = !initialVisibility;
+
+    					current.children[i].toggleChildrenVisibility(node, initialVisibility);
     				}
     			}
     		}
@@ -33625,10 +33621,17 @@ var app = (function () {
 
     	function handleItemClick(node) {
     		console.log('item click: ', node);
-    		node.toggleChildrenVisibility(node);
-    		node.override = !node.override;
-    		node.visibility = !node.visibility;
+    		let initialVisibility = true;
 
+    		if (node.children.length) {
+    			initialVisibility = node.children[0].visibility;
+    		}
+
+    		node.toggleChildrenVisibility(node, initialVisibility);
+
+    		//PETER COMMENTED OUT THE NEXT TWO LINES OF CODE
+    		// node.override = !node.override
+    		// node.visibility = !node.visibility
     		if (currentComponents[0]) {
     			$$invalidate(0, arr = []);
     			currentComponents[0].depthFirstPre(cb, arr);

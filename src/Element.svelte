@@ -7,7 +7,7 @@
   export let key
   export let boolean
   export let currentNode
-  export let override
+  // export let override
   // export let parentBoolean
   // let myClass = currentNode ? 'componentItem' : 'componentItem hidden'
 </script>
@@ -34,6 +34,7 @@
   }
   .hidden {
     background-color: purple;
+    display: none;
   }
   .showBtn {
     border-radius: 20px 20px;
@@ -48,7 +49,7 @@
 
 <div
   class={currentNode.visibility ? 'componentItem' : 'componentItem hidden'}
-  on:click={(e) => handleItemClick(currentNode)}>
+  on:click={() => handleItemClick(currentNode)}>
   <p>name: {name}</p>
   <p>current Node vis: {currentNode.visibility}</p>
   <!-- <p>override: {currentNode.override}</p> -->
