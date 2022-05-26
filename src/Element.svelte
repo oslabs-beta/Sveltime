@@ -1,15 +1,7 @@
 <script>
-  export let parent
   export let name
-  export let elemId
   export let handleItemClick
-  // export let handleButtonClick
-  export let key
-  export let boolean
   export let currentNode
-  // export let override
-  // export let parentBoolean
-  // let myClass = currentNode ? 'componentItem' : 'componentItem hidden'
 </script>
 
 <style>
@@ -26,22 +18,19 @@
     font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif,
       sans-serif;
     font-size: 1.5em;
-    /* border: 2px solid brown; */
     cursor: pointer;
     margin-left: var(--leftMargin, 4rem);
-    min-width: 60%;
-    width: 260px;
+    min-width: 50%;
+    max-width: 100px;
   }
   .hidden {
-    background-color: purple;
     display: none;
   }
-  .showBtn {
-    border-radius: 20px 20px;
-    background-color: orange;
-    cursor: pointer;
-    color: black;
+
+  .hiddenChildrenArrow {
+    font-size: 1em;
   }
+
   p {
     letter-spacing: 0.75px;
   }
@@ -50,20 +39,10 @@
 <div
   class={currentNode.visibility ? 'componentItem' : 'componentItem hidden'}
   on:click={() => handleItemClick(currentNode)}>
-  <p>name: {name}</p>
-  <p>current Node vis: {currentNode.visibility}</p>
-  <!-- <p>override: {currentNode.override}</p> -->
-  <!-- <p>visibility: {currentNodeVisibility}</p> -->
-
-  <!-- <p>parent: {parent}</p>
-  <p>elemId: {elemId}</p>
-  <p>key: {key}</p>
-  <p>boolean{boolean}</p>
-  <p>currentNode: {currentNode}</p> -->
-
-  <!-- <button
-    class="showBtn"
-    on:click|stopPropagation={(key) => handleButtonClick(key)}>
-    +
-  </button> -->
+  <p class="hiddenChildrenArrow">
+    <strong>
+      {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
+    </strong>
+    {name.toUpperCase()}
+  </p>
 </div>

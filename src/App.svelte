@@ -6,6 +6,7 @@
   import AllStores from './allStores.svelte'
   import ElementTree from './ElementTree.svelte'
   import Navbar from './Navbar.svelte'
+  import Footer from './Footer.svelte'
 
   export let headNodes: any = []
   // export let currentComponents = headNodes;
@@ -281,7 +282,7 @@
       this.parents = []
       this.children = []
       this.visibility = true
-      this.overrride = false
+      this.hasHiddenChildren = false
       this.depthFirstPre = this.depthFirstPre.bind(this)
       this.toggleChildrenVisibility = this.toggleChildrenVisibility.bind(this)
     }
@@ -300,7 +301,6 @@
       let current = this
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
-          ///PETER CHANGED !node.visibility to !current.children[i].visibility
           current.children[i].visibility = !initialVisibility
           current.children[i].toggleChildrenVisibility(node, initialVisibility)
         }
@@ -370,38 +370,32 @@
       initialVisibility = node.children[0].visibility
     }
     node.toggleChildrenVisibility(node, initialVisibility)
+    node.hasHiddenChildren = !node.hasHiddenChildren
     //PETER COMMENTED OUT THE NEXT TWO LINES OF CODE
     // node.override = !node.override
     // node.visibility = !node.visibility
     if (currentComponents[0]) {
       arr = []
       currentComponents[0].depthFirstPre(cb, arr)
-      console.log('arr after toggle children: ', arr)
+      // console.log('arr after toggle children: ', arr)
     }
   }
 
-  //
-  function handleButtonClick(e) {
-    console.log('button click: ', e.target)
-  }
-  function handleStoreClick(e) {
-    console.log('store click: ', e.target)
-  }
   export let showStores = false
   export let showTree = true
   export let showAbout = true
 
-  function handleShowStores() {
+  function handleShowStores(): void {
     if (!showTree) return
     showStores = !showStores
   }
 
-  function handleShowTree() {
+  function handleShowTree(): void {
     if (!showStores) return
     showTree = !showTree
   }
 
-  function handleShowAbout() {
+  function handleShowAbout(): void {
     if (!showStores) return
     showTree = !showTree
   }
@@ -433,6 +427,8 @@
     display: flex;
     justify-content: space-around;
     align-items: flex-start;
+    background-color: rgba(42, 44, 52, 1);
+    height: 100%;
   }
 </style>
 
@@ -454,8 +450,7 @@
     <AllStores {storeArr} />
   {/if}
   {#if showTree}
-    <ElementTree {arr} {handleItemClick} {handleButtonClick} />
+    <ElementTree {arr} {handleItemClick} />
   {/if}
-  <!-- {showStores ? <AllStores {storeArr} /> : null}
-  {showTree ? <ElementTree {arr} {handleItemClick} {handleButtonClick} /> : null} -->
+  <Footer {arr} />
 </div>
