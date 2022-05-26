@@ -81,9 +81,10 @@
         portBackground.onMessage.addListener((msg) => {
           console.log(
             'message received in App.svelte from background.js: ',
-            msg.componentArr,
+            msg,
           )
-          renderedComponentsArr = msg
+          arrayOfState = msg.componentDetailsList
+          renderedComponentsArr = msg.componentArr;
           getRenderedNode = getRenderedComponentNode();
           renderedComponentsArr.forEach((component, index) => {
             // renderedComponents = new ComponentNode(component);
@@ -297,7 +298,7 @@
   }
 
   function cb(str, arr, index, parent, id) {
-    arr.push([parent ? parent.componentName : parent, str, index, arrayOfState[id]])
+    arr.push([parent ? parent.componentName : parent, str, index, arrayOfState[id].details])
   }
 
   function getRenderedComponentNode() {

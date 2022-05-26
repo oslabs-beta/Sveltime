@@ -15,6 +15,7 @@ let firstRender = true;
 let addedComponents = 0;
 let mountedComponents = 0;
 let addComponentArr = [];
+let componentDetailsList = [];
 
 function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   let index;
@@ -102,6 +103,7 @@ function searchDeeplyNestedObject(obj, str, result = false, map = new Map(), pat
 
 window.document.addEventListener('SvelteRegisterComponent', (e) => {
   console.log('svelteRegisterComponent e:', e);
+  componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
 
   if (!firstRender) {
     componentMap2.set(componentArr.length + addedComponents, e);
@@ -143,7 +145,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         console.log('componentMap on add: ', componentMap);
         console.log(componentArr);
         console.log('componentTimeArr: ', componentTimeArr);
-        window.postMessage(componentArr);
+        window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
         addedComponents = 0;
         mountedComponents = 0;
         addComponentArr = [];
@@ -156,7 +158,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     // deleteComponent(componentArr, componentMap, e);
     deleteTimeComponent(componentArr, componentTimeArr, e);
     console.log('componentArr on destroy: ', componentArr);
-    window.postMessage(componentArr);
+    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
   });
 
 
@@ -172,7 +174,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
   if (e.detail.id === 'create_fragment' && firstRender){
     // console.log('componentMap2: ', componentMap2);
     console.log('componentArr on original render: ', componentArr);
-    window.postMessage(componentArr);
+    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
     firstRender = false;
   } 
 });
