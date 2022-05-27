@@ -1,7 +1,6 @@
 <script>
   import Element from './Element.svelte'
   export let handleItemClick
-  export let handleButtonClick
   export let arr
 </script>
 
@@ -26,13 +25,11 @@
 
 <div class="container">
   <div class="elementTree">
-    <!-- <h2>Components:</h2> -->
     {#each arr as item, i}
       <Element
         name={item[1]}
-        parent={item[0]}
-        elemId={item[2]}
         key={i}
+        currentNode={item[4]}
         {handleItemClick}
         {handleButtonClick}
         --leftMargin="{item[2] * 2.7}rem" />

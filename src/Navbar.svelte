@@ -16,6 +16,8 @@
     box-sizing: border-box;
   }
   .navbar {
+    position: fixed;
+    width: 100%;
     height: 65px;
     background-color: rgba(42, 44, 52, 1);
     display: flex;
@@ -23,7 +25,6 @@
     justify-content: space-between;
     align-items: center;
     gap: 20px;
-
     border-bottom: 1px solid rgb(115, 117, 126);
   }
   .btn {
@@ -36,7 +37,7 @@
     cursor: pointer;
     box-sizing: border-box;
     border-bottom: 2px solid transparent;
-    font-size: 1.2em;
+    font-size: 1em;
   }
 
   .on,
