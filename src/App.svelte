@@ -121,12 +121,12 @@
             }
           })
           console.log('renderedComponents: ', renderedComponents)
-
           if (currentComponents[0]) {
             currentComponents[0] = renderedComponents
             // console.log('currentComponents[0]: ', currentComponents[0])
             arr = []
             currentComponents[0].depthFirstPre(cb, arr)
+            arr = arr;
           }
         })
       }
@@ -291,7 +291,7 @@
     }
     depthFirstPre(callback, arr, index = 0, parent = null) {
       let current = this
-      callback(current.componentName, arr, index, parent, current)
+      callback(current.componentName, arr, index, parent, current, current.id)
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
           index += 1
@@ -316,7 +316,7 @@
       parent ? parent.componentName : parent,
       str,
       index,
-      arrayOfState[id],
+      arrayOfState[id].details,
       currentNode,
     ])
   }

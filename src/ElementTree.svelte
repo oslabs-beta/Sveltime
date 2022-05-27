@@ -2,7 +2,6 @@
   import Element from './Element.svelte'
   export let handleItemClick
   export let arr
-  setTimeout(()=> console.log('arr from element tree', arr), 1000);
 </script>
 
 <style>

@@ -16,6 +16,7 @@ let addedComponents = 0;
 let mountedComponents = 0;
 let addComponentArr = [];
 let componentDetailsList = [];
+let addComponentDetailsList = [];
 
 function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   let index;
@@ -38,6 +39,7 @@ function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   arrComponent.splice(arrComponent.length - 1);
   console.log('arrTimeComponent after delete: ', arrTimeComponent);
   console.log('arrComponent after delete: ', arrComponent);
+  componentDetailsList.splice(index, 1);
 
 
 }
@@ -103,13 +105,13 @@ function searchDeeplyNestedObject(obj, str, result = false, map = new Map(), pat
 
 window.document.addEventListener('SvelteRegisterComponent', (e) => {
   console.log('svelteRegisterComponent e:', e);
-  componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
 
   if (!firstRender) {
     componentMap2.set(componentArr.length + addedComponents, e);
     addedComponents++;
     addComponentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
     addComponentArr.push(e.detail.tagName);
+    addComponentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
 
 
@@ -125,7 +127,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
           if (componentArr[i] === addComponentArr[addComponentArr.length - 1]) {
             for (let k = componentArr.length - 1; k > i; k--) {
               console.log('i  k: ', i, k);
-              
+              componentDetailsList[k + addComponentDetailsList.length] = componentDetailsList[k]
               componentArr[k + addComponentArr.length] = componentArr[k];
               componentTimeArr[k + addComponentArr.length] = componentTimeArr[k].slice();
               componentMap.set(componentMap2.get(k), k + addComponentArr.length);
@@ -134,6 +136,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
             const len = componentMap.size;
             console.log('componentMap2: ', componentMap2);
             for (let j = 0; j < addComponentArr.length; j++) {
+              componentDetailsList[i + 1] = addComponentDetailsList[j]
               componentArr[i + 1] = addComponentArr[j];
               componentTimeArr[i + 1] = addComponentTimeArr[j].slice();
               componentMap.set(componentMap2.get(len + j), len - addComponentArr.length + j);
@@ -150,6 +153,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         mountedComponents = 0;
         addComponentArr = [];
         addComponentTimeArr = [];
+        addComponentDetailsList = [];
       }
     }
   })
@@ -167,7 +171,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     componentMap.set(e, componentArr.length);
     componentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
     componentArr.push(e.detail.tagName);
-    
+    componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
   console.log('e.detail.tagName: ',e.detail.tagName,  'e.detail.id: ',e.detail.id);
   
