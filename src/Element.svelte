@@ -25,6 +25,7 @@
   .componentItem:hover {
     filter: brightness(85%);
     border: 1px solid orange;
+    z-index: 1;
   }
 
   .showBtn {
@@ -42,11 +43,11 @@
   .hiddenChildrenArrow {
     font-size: 1em;
   }
-
-  p {
-  }
-  button {
+  /* button {
     border: none;
+  } */
+  p {
+    letter-spacing: 0.08em;
   }
 </style>
 
@@ -57,6 +58,6 @@
     <strong>
       {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
     </strong>
-    {name.toUpperCase()}
+    {name}
   </p>
 </div>
