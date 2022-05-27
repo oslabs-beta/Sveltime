@@ -1,18 +1,17 @@
 <script>
   import Element from './Element.svelte'
   export let handleItemClick
-  export let handleButtonClick
   export let arr
   setTimeout(()=> console.log('arr from element tree', arr), 1000);
 </script>
 
 <style>
   .container {
-    height: 100vh;
+    height: 100%;
     width: 100%;
     min-width: 55vw;
     background-color: rgb(52, 54, 62);
-    padding-top: 45px;
+    padding-top: 75px;
     border-left: 2px solid rgb(115, 117, 126);
     display: flex;
     flex-direction: column;
@@ -26,15 +25,12 @@
 
 <div class="container">
   <div class="elementTree">
-    <!-- <h2>Components:</h2> -->
     {#each arr as item, i}
       <Element
         name={item[1]}
-        parent={item[0]}
-        elemId={item[2]}
         key={i}
+        currentNode={item[4]}
         {handleItemClick}
-        {handleButtonClick}
         --leftMargin="{item[2] * 3}rem" />
     {/each}
   </div>
