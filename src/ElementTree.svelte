@@ -6,9 +6,7 @@
 
 <style>
   .container {
-    /* height: 100vh; */
     height: 100vh;
-
     width: 100%;
     min-width: 55vw;
     /* background-color: rgb(52, 54, 62); */

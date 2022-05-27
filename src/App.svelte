@@ -450,9 +450,11 @@
 
   <Modal {isOpenModal} on:closeModal={closeModal} />
 
-  {#if showStores}
+  <!-- This is for when stores are implemented
+    {#if showStores}
     <AllStores {storeArr} />
-  {/if}
+  {/if} -->
+
   {#if showTree}
     <ElementTree {arr} {handleItemClick} />
   {/if}
