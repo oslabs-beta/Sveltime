@@ -1,10 +1,7 @@
 <script>
-  export let parent
   export let name
-  export let elemId
   export let handleItemClick
-  export let handleButtonClick
-  export let key
+  export let currentNode
 </script>
 
 <style>
@@ -21,28 +18,31 @@
     font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif,
       sans-serif;
     font-size: 1.5em;
-    /* border: 2px solid brown; */
     cursor: pointer;
     margin-left: var(--leftMargin, 4rem);
-    min-width: 60%;
-    width: 260px;
+    min-width: 50%;
+    max-width: 100px;
   }
-  .showBtn {
-    border-radius: 20px 20px;
-    background-color: orange;
-    cursor: pointer;
-    color: black;
+  .hidden {
+    display: none;
   }
+
+  .hiddenChildrenArrow {
+    font-size: 1em;
+  }
+
   p {
     letter-spacing: 0.75px;
   }
 </style>
 
-<div class="componentItem" on:click={() => handleItemClick()}>
-  <p>{name}</p>
-  <button
-    class="showBtn"
-    on:click|stopPropagation={(key) => handleButtonClick(key)}>
-    +
-  </button>
+<div
+  class={currentNode.visibility ? 'componentItem' : 'componentItem hidden'}
+  on:click={() => handleItemClick(currentNode)}>
+  <p class="hiddenChildrenArrow">
+    <strong>
+      {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
+    </strong>
+    {name.toUpperCase()}
+  </p>
 </div>

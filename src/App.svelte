@@ -6,6 +6,7 @@
   import AllStores from './allStores.svelte'
   import ElementTree from './ElementTree.svelte'
   import Navbar from './Navbar.svelte'
+  import Footer from './Footer.svelte'
 
   export let headNodes: any = []
   // export let currentComponents = headNodes;
@@ -283,11 +284,14 @@
       this.parents = []
       this.children = []
       this.id;
+      this.visibility = true
+      this.hasHiddenChildren = false
       this.depthFirstPre = this.depthFirstPre.bind(this)
+      this.toggleChildrenVisibility = this.toggleChildrenVisibility.bind(this)
     }
     depthFirstPre(callback, arr, index = 0, parent = null) {
       let current = this
-      callback(current.componentName, arr, index, parent, current.id)
+      callback(current.componentName, arr, index, parent, current)
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
           index += 1
@@ -295,10 +299,26 @@
         }
       }
     }
+
+    toggleChildrenVisibility(node, initialVisibility) {
+      let current = this
+      if (current.children.length) {
+        for (let i = 0; i < current.children.length; i++) {
+          current.children[i].visibility = !initialVisibility
+          current.children[i].toggleChildrenVisibility(node, initialVisibility)
+        }
+      }
+    }
   }
 
-  function cb(str, arr, index, parent, id) {
-    arr.push([parent ? parent.componentName : parent, str, index, arrayOfState[id].details])
+  function cb(str, arr, index, parent, currentNode, id) {
+    arr.push([
+      parent ? parent.componentName : parent,
+      str,
+      index,
+      arrayOfState[id],
+      currentNode,
+    ])
   }
 
   function getRenderedComponentNode() {
@@ -347,30 +367,39 @@
     return headNodes
   }
 
-  function handleItemClick() {
-    console.log('item click: ')
+  function handleItemClick(node) {
+    console.log('item click: ', node)
+    let initialVisibility = true
+    if (node.children.length) {
+      initialVisibility = node.children[0].visibility
+    }
+    node.toggleChildrenVisibility(node, initialVisibility)
+    node.hasHiddenChildren = !node.hasHiddenChildren
+    //PETER COMMENTED OUT THE NEXT TWO LINES OF CODE
+    // node.override = !node.override
+    // node.visibility = !node.visibility
+    if (currentComponents[0]) {
+      arr = []
+      currentComponents[0].depthFirstPre(cb, arr)
+      // console.log('arr after toggle children: ', arr)
+    }
   }
-  function handleButtonClick(e) {
-    console.log('button click: ', e.target)
-  }
-  function handleStoreClick(e) {
-    console.log('store click: ', e.target)
-  }
-  export let showStores = true
+
+  export let showStores = false
   export let showTree = true
   export let showAbout = true
 
-  function handleShowStores() {
+  function handleShowStores(): void {
     if (!showTree) return
     showStores = !showStores
   }
 
-  function handleShowTree() {
+  function handleShowTree(): void {
     if (!showStores) return
     showTree = !showTree
   }
 
-  function handleShowAbout() {
+  function handleShowAbout(): void {
     if (!showStores) return
     showTree = !showTree
   }
@@ -402,6 +431,8 @@
     display: flex;
     justify-content: space-around;
     align-items: flex-start;
+    background-color: rgba(42, 44, 52, 1);
+    height: 100%;
   }
 </style>
 
@@ -423,8 +454,7 @@
     <AllStores {storeArr} />
   {/if}
   {#if showTree}
-    <ElementTree {arr} {handleItemClick} {handleButtonClick} />
+    <ElementTree {arr} {handleItemClick} />
   {/if}
-  <!-- {showStores ? <AllStores {storeArr} /> : null}
-  {showTree ? <ElementTree {arr} {handleItemClick} {handleButtonClick} /> : null} -->
+  <Footer {arr} />
 </div>
