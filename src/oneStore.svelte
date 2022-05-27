@@ -9,11 +9,11 @@
     justify-content: space-between;
     align-items: center;
     /* background-color: #3e4c59; */
-    background-color: rgb(62, 62, 62);
+    background-color: rgb(104, 99, 99);
     padding: 2px 15px;
     margin: 20px;
     border-radius: 6px;
-    /* font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif, */
+    /* font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif, sans-serif; */
     font-family: 'Encode Sans', sans-serif;
     /* border: 2px solid red; */
     cursor: pointer;

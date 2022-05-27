@@ -32370,9 +32370,9 @@ var app = (function () {
     			p1 = element("p");
     			t3 = text$1("Data: ");
     			t4 = text$1(/*data*/ ctx[1]);
-    			attr(p0, "class", "svelte-3q7ly3");
-    			attr(p1, "class", "svelte-3q7ly3");
-    			attr(div, "class", "store svelte-3q7ly3");
+    			attr(p0, "class", "svelte-tqvmt2");
+    			attr(p1, "class", "svelte-tqvmt2");
+    			attr(div, "class", "store svelte-tqvmt2");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32424,7 +32424,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (27:2) {#each storeArr as store, i}
+    // (28:2) {#each storeArr as store, i}
     function create_each_block$1(ctx) {
     	let onestore;
     	let current;
@@ -32486,7 +32486,7 @@ var app = (function () {
     				each_blocks[i].c();
     			}
 
-    			attr(div, "class", "allStores svelte-gu2pyf");
+    			attr(div, "class", "allStores svelte-ljobj3");
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32674,7 +32674,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (29:4) {#each arr as item, i}
+    // (30:4) {#each arr as item, i}
     function create_each_block(ctx) {
     	let element_1;
     	let div;
@@ -32697,7 +32697,7 @@ var app = (function () {
     			div = element("div");
     			create_component(element_1.$$.fragment);
     			set_style(div, "display", "contents");
-    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.5 + "rem"));
+    			set_style(div, "--leftMargin", __leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.7 + "rem"));
     		},
     		m(target, anchor) {
     			insert(target, div, anchor);
@@ -32705,7 +32705,7 @@ var app = (function () {
     			current = true;
     		},
     		p(ctx, dirty) {
-    			if (dirty & /*arr*/ 4 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.5 + "rem"))) {
+    			if (dirty & /*arr*/ 4 && __leftMargin_last !== (__leftMargin_last = "" + (/*item*/ ctx[3][2] * 2.7 + "rem"))) {
     				set_style(div, "--leftMargin", __leftMargin_last);
     			}
 
@@ -32757,8 +32757,8 @@ var app = (function () {
     				each_blocks[i].c();
     			}
 
-    			attr(div0, "class", "elementTree svelte-yvv3hx");
-    			attr(div1, "class", "container svelte-yvv3hx");
+    			attr(div0, "class", "elementTree svelte-172ni8r");
+    			attr(div1, "class", "container svelte-172ni8r");
     		},
     		m(target, anchor) {
     			insert(target, div1, anchor);

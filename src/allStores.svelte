@@ -11,7 +11,8 @@
     align-items: center;
     left: 50px;
     /* background-color: rgb(52, 54, 62); */
-    background-color: #121212;
+    background-color: #222222;
+    /* background-color: #121212; */
     width: 100%;
     height: 100vh;
     /* padding-left: 30px; */
