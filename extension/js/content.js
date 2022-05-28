@@ -102,10 +102,10 @@ function searchDeeplyNestedObject(obj, str, result = false, map = new Map(), pat
   return result
 }
 
-
+let start;
 window.document.addEventListener('SvelteRegisterComponent', (e) => {
   console.log('svelteRegisterComponent e:', e);
-
+  start = window.performance.now();
   if (!firstRender) {
     componentMap2.set(componentArr.length + addedComponents, e);
     addedComponents++;
@@ -114,11 +114,19 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     addComponentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
 
+  // e.detail.component.$$.before_update.push(() => {
+  //   console.log(e.detail.tagName, ' before update');
+  // })
+
+  // e.detail.component.$$.after_update.push(() => {
+  //   console.log(e.detail.tagName, ' after update');
+  // })
 
   e.detail.component.$$.on_mount.push(() => {
-   
+   e.detail.component.customRenderTime = window.performance.now() - start;
 
     console.log(e.detail.tagName, ' just mounted');
+    console.log('customRenderTime: ', e.detail.component.customRenderTime);
     if (!firstRender) {
       mountedComponents++;
       if (mountedComponents === addedComponents && addComponentArr.length > 0) {
@@ -148,7 +156,9 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         console.log('componentMap on add: ', componentMap);
         console.log(componentArr);
         console.log('componentTimeArr: ', componentTimeArr);
-        window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
+        // window.postMessage(componentTimeArr);
+       
+        window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
         addedComponents = 0;
         mountedComponents = 0;
         addComponentArr = [];
@@ -156,17 +166,21 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         addComponentDetailsList = [];
       }
     }
-  })
+
+    
+  });
   e.detail.component.$$.on_destroy.push(() => {
     console.log('e.detail.component.$$.on_destroy: ', e.detail.tagName, ' was destroyed!');
     // deleteComponent(componentArr, componentMap, e);
     deleteTimeComponent(componentArr, componentTimeArr, e);
     console.log('componentArr on destroy: ', componentArr);
-    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
+    // window.postMessage(componentTimeArr);
+    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
   });
 
 
   if (firstRender) {
+
     componentMap2.set(componentArr.length, e);
     componentMap.set(e, componentArr.length);
     componentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
@@ -174,13 +188,15 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
   console.log('e.detail.tagName: ',e.detail.tagName,  'e.detail.id: ',e.detail.id);
-  
+
   if (e.detail.id === 'create_fragment' && firstRender){
     // console.log('componentMap2: ', componentMap2);
     console.log('componentArr on original render: ', componentArr);
-    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
+    // window.postMessage(componentTimeArr);
+    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
     firstRender = false;
   } 
+  
 });
 })()`;
 
@@ -200,11 +216,26 @@ document.documentElement.dispatchEvent(new CustomEvent('reset'));
   
 //   return true;
 // });
+function rebaseRenderTime(arr) {
+  if (!arr.length) return arr;
+  for (let i = arr.length - 1; i > 0; i--) {
+    arr[i][1] -= arr[i - 1][1];
+    arr[i][1] = arr[i][1].toFixed(2);
+  }
+  arr[0][1] = 0.00;
+  return arr;
+}
 
 window.addEventListener("message", function(event) {
+  // const data = rebaseRenderTime(event.data);
+  // console.log('event.data: ', data);
+  
+  // chrome.runtime.sendMessage(data);
   console.log('event.data: ', event.data);
   chrome.runtime.sendMessage(JSON.parse(event.data));
 });
+
+
 
 // window.document.addEventListener('SvelteDOMInsert', e => {
 //   console.log('svelteDOMinsert e: ', e);
