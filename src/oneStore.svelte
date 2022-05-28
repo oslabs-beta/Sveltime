@@ -8,22 +8,27 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background-color: #3e4c59;
+    /* background-color: #3e4c59; */
+    background-color: rgb(104, 99, 99);
     padding: 2px 15px;
     margin: 20px;
     border-radius: 6px;
-    font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif,
-      sans-serif;
+    /* font-family: 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif, sans-serif; */
+    font-family: 'Encode Sans', sans-serif;
     /* border: 2px solid red; */
     cursor: pointer;
     color: #eee;
     min-width: 60%;
     width: 260px;
-    border: 1px solid rgb(115, 117, 126);
+    /* border: 1px solid rgb(115, 117, 126); */
+    border: 1px transparent solid
+  }
+  .store:hover {
+    filter: brightness(85%);
+    border: 1px solid orange;
   }
   p {
-    font-size: 1.5em;
-    letter-spacing: 0.75px;
+    font-size: 1.4em;
   }
 </style>
 
