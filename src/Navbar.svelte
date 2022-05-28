@@ -17,6 +17,7 @@
   }
   .navbar {
     position: fixed;
+    z-index: 100;
     width: 100%;
     height: 65px;
     background-color: rgba(42, 44, 52, 1);
@@ -73,11 +74,12 @@
 <div class="navbar" id="navbar">
   <h1 class="logoTitle">SVELTIME</h1>
   <div class="buttonBox">
-    <button
+    <!-- turn this on if turning on App.svelte if condition to render and show stores.
+      <button
       class={showStores ? 'btn on' : 'btn off'}
       on:click={() => handleShowStores()}>
       Stores
-    </button>
+    </button> -->
     <button
       class={showTree ? 'btn on' : 'btn off'}
       on:click={() => handleShowTree()}>

@@ -422,12 +422,16 @@
   * {
     margin: 0;
     padding: 0;
+    background-color: #222222;
+  }
+  body {
+    background-color: #222222;
   }
   .container {
     display: flex;
     justify-content: space-around;
     align-items: flex-start;
-    background-color: rgba(42, 44, 52, 1);
+    background-color: #222222;
     height: 100%;
   }
 </style>
@@ -446,9 +450,11 @@
 
   <Modal {isOpenModal} on:closeModal={closeModal} />
 
-  {#if showStores}
+  <!-- This is for when stores are implemented
+    {#if showStores}
     <AllStores {storeArr} />
-  {/if}
+  {/if} -->
+
   {#if showTree}
     <ElementTree {arr} {handleItemClick} />
   {/if}
