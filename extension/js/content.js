@@ -203,7 +203,7 @@ document.documentElement.dispatchEvent(new CustomEvent('reset'));
 
 window.addEventListener("message", function(event) {
   console.log('event.data: ', event.data);
-  chrome.runtime.sendMessage(JSON.parse(event.data));
+  chrome.runtime.sendMessage(event.data);
 });
 
 // window.document.addEventListener('SvelteDOMInsert', e => {
