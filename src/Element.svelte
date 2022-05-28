@@ -2,7 +2,6 @@
   export let name
   export let handleItemClick
   export let currentNode
-	import CollapsibleSection from './CollapsibleSection.svelte'
   let isStateShowing = false
 </script>
 
@@ -12,8 +11,6 @@
     flex-direction: column;
     align-items: flex-start;
 
-
-    
     /* display: flex;
     justify-content: space-between;
     align-items: center; */
@@ -38,7 +35,7 @@
 
   .showBtn {
     border-radius: 20px 20px;
-    background-color: rgba(255, 166, 0, 0.80);
+    background-color: rgba(255, 166, 0, 0.8);
     cursor: pointer;
     color: black;
     min-width: 50%;
@@ -56,7 +53,6 @@
   } */
   p {
     letter-spacing: 0.08em;
-
   }
   .hiddenState {
     background-color: rgb(255, 255, 255);
@@ -65,7 +61,7 @@
     margin-bottom: 10px;
     /* padding-left:15px; */
   }
-  
+
   .showHideState {
     background-color: green;
     color: white;
@@ -91,8 +87,7 @@
 
 <div
   class={currentNode.visibility ? 'componentItem' : 'componentItem hidden'}
-  on:click|stopPropagation={() => handleItemClick(currentNode)}
-  >
+  on:click|stopPropagation={() => handleItemClick(currentNode)}>
   <div id="firstDiv">
     <p class="hiddenChildrenArrow">
       <strong>
@@ -100,7 +95,13 @@
       </strong>
       {name}
     </p>
-    <button class="showHideState" on:click|stopPropagation={()=>{isStateShowing = !isStateShowing}}>Show State</button>
+    <button
+      class="showHideState"
+      on:click|stopPropagation={() => {
+        isStateShowing = !isStateShowing
+      }}>
+      Show State
+    </button>
   </div>
   <!-- <CollapsibleSection headerText={'State'} >
     Here is state for this component.
@@ -111,4 +112,3 @@
     <p>Hidden State Information</p>
   </div>
 </div>
-
