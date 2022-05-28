@@ -2,7 +2,7 @@
   export let name
   export let handleItemClick
   export let currentNode
-	import CollapsibleSection from './CollapsibleSection.svelte'
+	// import CollapsibleSection from './CollapsibleSection.svelte'
   let isStateShowing = false
 </script>
 

@@ -1,5 +1,5 @@
 
-(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35730/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
+(function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
 var app = (function () {
     'use strict';
 
@@ -32471,6 +32471,8 @@ var app = (function () {
     	let { name } = $$props;
     	let { handleItemClick } = $$props;
     	let { currentNode } = $$props;
+
+    	// import CollapsibleSection from './CollapsibleSection.svelte'
     	let isStateShowing = false;
 
     	const click_handler = () => {
@@ -32516,7 +32518,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (28:4) {#each arr as item, i}
+    // (29:4) {#each arr as item, i}
     function create_each_block(ctx) {
     	let element_1;
     	let div;
@@ -32664,6 +32666,7 @@ var app = (function () {
     function instance$4($$self, $$props, $$invalidate) {
     	let { handleItemClick } = $$props;
     	let { arr } = $$props;
+    	setTimeout(() => console.log('arr from element tree', arr), 1000);
 
     	$$self.$$set = $$props => {
     		if ('handleItemClick' in $$props) $$invalidate(0, handleItemClick = $$props.handleItemClick);
@@ -33238,10 +33241,6 @@ var app = (function () {
     	return allComponentsParents;
     }
 
-    function cb(str, arr, index, parent, currentNode) {
-    	arr.push([parent ? parent.componentName : parent, str, index, true, currentNode]);
-    }
-
     function updateHeadNodes(allComponents, allComponentsParents, headNodes, getNode) {
     	Object.keys(allComponents).forEach(key => {
     		const node = getNode(key);
@@ -33272,6 +33271,7 @@ var app = (function () {
     	let { arr = [] } = $$props;
     	let { renderedComponentsArr } = $$props;
     	let { renderedComponents } = $$props;
+    	let { arrayOfState = [] } = $$props;
 
     	// chrome.runtime.onMessage.addListener((msg, sender, response) => {
     	//     console.log('arr received onMessage: ', msg);
@@ -33333,7 +33333,7 @@ var app = (function () {
     				});
 
     				portBackground.onMessage.addListener(msg => {
-    					console.log('message received in App.svelte from background.js: ', msg);
+    					console.log('message received in App.svelte from background.js: ', msg.componentArr);
     					$$invalidate(13, renderedComponentsArr = msg);
     					getRenderedNode = getRenderedComponentNode();
 
@@ -33380,6 +33380,7 @@ var app = (function () {
     			this.componentName = componentName;
     			this.parents = [];
     			this.children = [];
+    			this.id;
     			this.visibility = true;
     			this.hasHiddenChildren = false;
     			this.depthFirstPre = this.depthFirstPre.bind(this);
@@ -33410,6 +33411,16 @@ var app = (function () {
     		}
     	}
 
+    	function cb(str, arr, index, parent, currentNode, id) {
+    		arr.push([
+    			parent ? parent.componentName : parent,
+    			str,
+    			index,
+    			arrayOfState[id],
+    			currentNode
+    		]);
+    	}
+
     	function getRenderedComponentNode() {
     		const componentObj = {};
 
@@ -33417,6 +33428,7 @@ var app = (function () {
     			const key = componentName + id;
     			if (componentObj.hasOwnProperty(key)) return componentObj[key];
     			const node = new ComponentNode(componentName);
+    			node.id = id;
     			return componentObj[key] = node;
     		};
     	}
@@ -33485,6 +33497,7 @@ var app = (function () {
     		if ('arr' in $$props) $$invalidate(0, arr = $$props.arr);
     		if ('renderedComponentsArr' in $$props) $$invalidate(13, renderedComponentsArr = $$props.renderedComponentsArr);
     		if ('renderedComponents' in $$props) $$invalidate(14, renderedComponents = $$props.renderedComponents);
+    		if ('arrayOfState' in $$props) $$invalidate(15, arrayOfState = $$props.arrayOfState);
     		if ('showStores' in $$props) $$invalidate(1, showStores = $$props.showStores);
     		if ('showTree' in $$props) $$invalidate(2, showTree = $$props.showTree);
     		if ('showAbout' in $$props) $$invalidate(3, showAbout = $$props.showAbout);
@@ -33505,7 +33518,8 @@ var app = (function () {
     		headNodes,
     		currentComponents,
     		renderedComponentsArr,
-    		renderedComponents
+    		renderedComponents,
+    		arrayOfState
     	];
     }
 
@@ -33519,6 +33533,7 @@ var app = (function () {
     			arr: 0,
     			renderedComponentsArr: 13,
     			renderedComponents: 14,
+    			arrayOfState: 15,
     			showStores: 1,
     			showTree: 2,
     			showAbout: 3
