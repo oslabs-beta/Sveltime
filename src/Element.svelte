@@ -97,6 +97,7 @@
     <p class="hiddenChildrenArrow">
       <strong>
         {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
+        Render Time: {currentNode.renderTime}ms
       </strong>
       {name}
     </p>

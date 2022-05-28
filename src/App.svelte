@@ -105,6 +105,7 @@
             )
             renderedComponentsArr = portBackgroundMsg.componentTimeArr
             arrayOfState = portBackgroundMsg.componentDetailsList
+            console.log('arrayOfState received: ', arrayOfState);
             getRenderedNode = getRenderedComponentNode();
             renderedComponentsArr.forEach((component, index) => {
               // renderedComponents = new ComponentNode(component);
