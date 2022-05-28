@@ -14,6 +14,7 @@
   export let arr = []
   export let renderedComponentsArr: any
   export let renderedComponents: any
+  export let arrayOfState = [];
 
   // chrome.runtime.onMessage.addListener((msg, sender, response) => {
   //     console.log('arr received onMessage: ', msg);
@@ -83,8 +84,9 @@
             'message received in App.svelte from background.js: ',
             msg,
           )
-          renderedComponentsArr = msg
-          getRenderedNode = getRenderedComponentNode()
+          arrayOfState = msg.componentDetailsList
+          renderedComponentsArr = msg.componentArr;
+          getRenderedNode = getRenderedComponentNode();
           renderedComponentsArr.forEach((component, index) => {
             // renderedComponents = new ComponentNode(component);
             renderedComponents = getRenderedNode(component, index)
@@ -119,12 +121,12 @@
             }
           })
           console.log('renderedComponents: ', renderedComponents)
-
           if (currentComponents[0]) {
             currentComponents[0] = renderedComponents
             // console.log('currentComponents[0]: ', currentComponents[0])
             arr = []
             currentComponents[0].depthFirstPre(cb, arr)
+            arr = arr;
           }
         })
       }
@@ -281,6 +283,7 @@
       this.componentName = componentName
       this.parents = []
       this.children = []
+      this.id;
       this.visibility = true
       this.hasHiddenChildren = false
       this.depthFirstPre = this.depthFirstPre.bind(this)
@@ -288,7 +291,7 @@
     }
     depthFirstPre(callback, arr, index = 0, parent = null) {
       let current = this
-      callback(current.componentName, arr, index, parent, current)
+      callback(current.componentName, arr, index, parent, current, current.id)
       if (current.children.length) {
         for (let i = 0; i < current.children.length; i++) {
           index += 1
@@ -308,12 +311,12 @@
     }
   }
 
-  function cb(str, arr, index, parent, currentNode) {
+  function cb(str, arr, index, parent, currentNode, id) {
     arr.push([
       parent ? parent.componentName : parent,
       str,
       index,
-      true,
+      arrayOfState[id].details,
       currentNode,
     ])
   }
@@ -325,6 +328,7 @@
       const key = componentName + id
       if (componentObj.hasOwnProperty(key)) return componentObj[key]
       const node = new ComponentNode(componentName)
+      node.id = id;
       return (componentObj[key] = node)
     }
   }

@@ -15,6 +15,8 @@ let firstRender = true;
 let addedComponents = 0;
 let mountedComponents = 0;
 let addComponentArr = [];
+let componentDetailsList = [];
+let addComponentDetailsList = [];
 
 function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   let index;
@@ -37,6 +39,7 @@ function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   arrComponent.splice(arrComponent.length - 1);
   console.log('arrTimeComponent after delete: ', arrTimeComponent);
   console.log('arrComponent after delete: ', arrComponent);
+  componentDetailsList.splice(index, 1);
 
 
 }
@@ -108,6 +111,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     addedComponents++;
     addComponentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
     addComponentArr.push(e.detail.tagName);
+    addComponentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
 
 
@@ -123,7 +127,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
           if (componentArr[i] === addComponentArr[addComponentArr.length - 1]) {
             for (let k = componentArr.length - 1; k > i; k--) {
               console.log('i  k: ', i, k);
-              
+              componentDetailsList[k + addComponentDetailsList.length] = componentDetailsList[k]
               componentArr[k + addComponentArr.length] = componentArr[k];
               componentTimeArr[k + addComponentArr.length] = componentTimeArr[k].slice();
               componentMap.set(componentMap2.get(k), k + addComponentArr.length);
@@ -132,6 +136,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
             const len = componentMap.size;
             console.log('componentMap2: ', componentMap2);
             for (let j = 0; j < addComponentArr.length; j++) {
+              componentDetailsList[i + 1] = addComponentDetailsList[j]
               componentArr[i + 1] = addComponentArr[j];
               componentTimeArr[i + 1] = addComponentTimeArr[j].slice();
               componentMap.set(componentMap2.get(len + j), len - addComponentArr.length + j);
@@ -143,11 +148,12 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         console.log('componentMap on add: ', componentMap);
         console.log(componentArr);
         console.log('componentTimeArr: ', componentTimeArr);
-        window.postMessage(componentArr);
+        window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
         addedComponents = 0;
         mountedComponents = 0;
         addComponentArr = [];
         addComponentTimeArr = [];
+        addComponentDetailsList = [];
       }
     }
   })
@@ -156,7 +162,7 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     // deleteComponent(componentArr, componentMap, e);
     deleteTimeComponent(componentArr, componentTimeArr, e);
     console.log('componentArr on destroy: ', componentArr);
-    window.postMessage(componentArr);
+    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
   });
 
 
@@ -165,14 +171,14 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     componentMap.set(e, componentArr.length);
     componentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
     componentArr.push(e.detail.tagName);
-    
+    componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
   console.log('e.detail.tagName: ',e.detail.tagName,  'e.detail.id: ',e.detail.id);
   
   if (e.detail.id === 'create_fragment' && firstRender){
     // console.log('componentMap2: ', componentMap2);
     console.log('componentArr on original render: ', componentArr);
-    window.postMessage(componentArr);
+    window.postMessage(JSON.stringify({'componentArr': componentArr, 'componentDetailsList': componentDetailsList}));
     firstRender = false;
   } 
 });
@@ -197,8 +203,7 @@ document.documentElement.dispatchEvent(new CustomEvent('reset'));
 
 window.addEventListener("message", function(event) {
   console.log('event.data: ', event.data);
-  
-  chrome.runtime.sendMessage(event.data);
+  chrome.runtime.sendMessage(JSON.parse(event.data));
 });
 
 // window.document.addEventListener('SvelteDOMInsert', e => {
