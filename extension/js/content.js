@@ -1,8 +1,4 @@
-let editorExtensionId = chrome.runtime.id;
-
-
-const code = `let editorExtensionId = '${editorExtensionId}';
-
+const code = `
 (function() {
 console.log('This is the content script');
 let componentArr = [];
@@ -11,6 +7,8 @@ let componentTimeArr = [];
 let addComponentTimeArr = [];
 const componentMap = new Map();
 const componentMap2 = new Map();
+const componentObj1 = {};
+let componentObj2 = {};
 let firstRender = true;
 let addedComponents = 0;
 let mountedComponents = 0;
@@ -49,78 +47,26 @@ function deleteComponent(arr, map, event) {
   for (let i = map.get(event); i < arr.length - 1; i++) {
     arr[i] = arr[i + 1];
   }
-
   console.log('map: ', map);
   map.delete(event);
-  // for (const key of map.keys()) {
-  //   map.set(key, index);
-  //   index++;
-  // }
   return arr.splice(arr.length - 1);
-}
-
-function searchDeeplyNestedObject(obj, str, result = false, map = new Map(), path = '') {
-  if (typeof obj !== 'object') return result;
-  
-  
-  if (Array.isArray(obj)) {
-    
-    for (const value of obj) {
-      if (typeof value === 'object') {
-        result = searchDeeplyNestedObject(value, str, result, map, path);
-      }
-      if (typeof value === 'string') {
-        if (value === str) {
-          result = true;
-          break;
-        }
-      }
-    }
-  }
-  else {
-    if (!map.has(obj)) {
-      map.set(obj, true);
-      for (const key in obj) {
-        path  = path + ' -> ' + key;
-        if (key === 'cssRules' || key === 'rules') {
-          // console.log('path: ', path);
-          continue;
-        }
-        if (typeof obj[key] === 'object') {
-					
-          result = searchDeeplyNestedObject(obj[key], str, result, map, path);
-        }
-        if (typeof obj[key] === 'string') {
-          if (obj[key] === str) {
-						result = true;
-            break;
-          }
-        }
-      }
-    }
-  }
-  return result
 }
 
 let start;
 window.document.addEventListener('SvelteRegisterComponent', (e) => {
   console.log('svelteRegisterComponent e:', e);
   start = window.performance.now();
+  
+  componentObj1[e.detail.tagName + parseFloat(e.timeStamp.toFixed(10))] = e;
+
   if (!firstRender) {
     componentMap2.set(componentArr.length + addedComponents, e);
     addedComponents++;
     addComponentTimeArr.push([e.detail.tagName, parseFloat(e.timeStamp.toFixed(10))]);
+    
     addComponentArr.push(e.detail.tagName);
     addComponentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
-
-  // e.detail.component.$$.before_update.push(() => {
-  //   console.log(e.detail.tagName, ' before update');
-  // })
-
-  // e.detail.component.$$.after_update.push(() => {
-  //   console.log(e.detail.tagName, ' after update');
-  // })
 
   e.detail.component.$$.on_mount.push(() => {
    e.detail.component.customRenderTime = window.performance.now() - start;
@@ -156,9 +102,17 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
         console.log('componentMap on add: ', componentMap);
         console.log(componentArr);
         console.log('componentTimeArr: ', componentTimeArr);
-        // window.postMessage(componentTimeArr);
        
-        window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+        // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+
+        for (const [key, value] of Object.entries(componentObj1)) {
+          componentObj2[key] = value.detail.component.$capture_state();
+        }
+
+        window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList, 'componentObj2' : componentObj2}));
+
+        componentObj2 = {};
+
         addedComponents = 0;
         mountedComponents = 0;
         addComponentArr = [];
@@ -174,8 +128,16 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     // deleteComponent(componentArr, componentMap, e);
     deleteTimeComponent(componentArr, componentTimeArr, e);
     console.log('componentArr on destroy: ', componentArr);
-    // window.postMessage(componentTimeArr);
-    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+    
+    // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+
+    for (const [key, value] of Object.entries(componentObj1)) {
+      componentObj2[key] =  value.detail.component.$capture_state();
+    }
+
+    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList, 'componentObj2' : componentObj2}));
+
+    componentObj2 = {};
   });
 
 
@@ -192,8 +154,16 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
   if (e.detail.id === 'create_fragment' && firstRender){
     // console.log('componentMap2: ', componentMap2);
     console.log('componentArr on original render: ', componentArr);
-    // window.postMessage(componentTimeArr);
-    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+    // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
+
+    for (const [key, value] of Object.entries(componentObj1)) {
+      componentObj2[key] = value.detail.component.$capture_state();
+    }
+
+    window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList, 'componentObj2' : componentObj2}));
+
+    componentObj2 = {};
+
     firstRender = false;
   } 
   
@@ -203,19 +173,6 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
 document.documentElement.setAttribute('onreset', code);
 document.documentElement.dispatchEvent(new CustomEvent('reset'));
 
-// chrome.runtime.onMessage.addListener((msg, sender, response)=> {
-//   console.log('msg recieved on content.js: ', msg);
-//   // window.postMessage({header : "APP MOUNTED"});
-  
-//   return true;
-// });
-
-// chrome.runtime.onMessage.addListener((msg, sender, response)=> {
-//   console.log('msg recieved on content.js: ', msg);
-//   // window.postMessage({header : "APP MOUNTED"});
-  
-//   return true;
-// });
 function rebaseRenderTime(arr) {
   if (!arr.length) return arr;
   for (let i = arr.length - 1; i > 0; i--) {
@@ -226,13 +183,31 @@ function rebaseRenderTime(arr) {
   return arr;
 }
 
+function resetComponentDetailsList(parsedData) {
+  const { componentTimeArr, componentDetailsList, componentObj2 } = parsedData;
+  if (componentTimeArr.length !== componentDetailsList.length) {
+    console.log('ERROR: componentTimeArr and componentDetailsList do not have the same length');
+    return;
+  }
+  for (let i = 0; i < componentTimeArr.length; i++) {
+    if (componentTimeArr[i][0] !== componentDetailsList[i].name) {
+      console.log(`ERROR: Elements at index ${i} do not match in componentTimeArr and componentDetailsList`);
+      return;
+    }
+    const key = componentTimeArr[i][0] + componentTimeArr[i][1];
+    componentDetailsList[i].details = componentObj2[key];
+  }
+  parsedData.componentObj2 = null;
+  return parsedData;
+}
+
 window.addEventListener("message", function(event) {
-  // const data = rebaseRenderTime(event.data);
-  // console.log('event.data: ', data);
-  
-  // chrome.runtime.sendMessage(data);
-  console.log('event.data: ', event.data);
-  chrome.runtime.sendMessage(JSON.parse(event.data));
+  let parsedData = JSON.parse(event.data);
+  parsedData = resetComponentDetailsList(parsedData);
+  console.log('parsedData before rebase: ', parsedData);
+  parsedData.componentTimeArr = rebaseRenderTime(parsedData.componentTimeArr);
+  console.log('parsedData: ', parsedData);
+  chrome.runtime.sendMessage(parsedData);
 });
 
 

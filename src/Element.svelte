@@ -1,8 +1,8 @@
 <script>
   export let name
+  export let stateData
   export let handleItemClick
   export let currentNode
-	// import CollapsibleSection from './CollapsibleSection.svelte'
   let isStateShowing = false
 </script>
 
@@ -12,8 +12,6 @@
     flex-direction: column;
     align-items: flex-start;
 
-
-    
     /* display: flex;
     justify-content: space-between;
     align-items: center; */
@@ -38,7 +36,7 @@
 
   .showBtn {
     border-radius: 20px 20px;
-    background-color: rgba(255, 166, 0, 0.80);
+    background-color: rgba(255, 166, 0, 0.8);
     cursor: pointer;
     color: black;
     min-width: 50%;
@@ -56,7 +54,6 @@
   } */
   p {
     letter-spacing: 0.08em;
-
   }
   .hiddenState {
     background-color: rgb(255, 255, 255);
@@ -64,14 +61,15 @@
     width: 100%;
     margin-bottom: 10px;
     /* padding-left:15px; */
+    overflow-x: hidden;
   }
-  
+
   .showHideState {
     background-color: green;
     color: white;
     border-radius: 5px;
     height: 30px;
-    width: 100px;
+    width: 65px;
     border-radius: 8px;
   }
   #firstDiv {
@@ -87,28 +85,39 @@
     font-family: monospace;
     letter-spacing: 0;
   }
+
+  .renderTime {
+    color: rgba(255, 166, 0, 0.8);
+    font-size: 1em;
+    margin-left: 20px;
+  }
 </style>
 
 <div
   class={currentNode.visibility ? 'componentItem' : 'componentItem hidden'}
-  on:click|stopPropagation={() => handleItemClick(currentNode)}
-  >
+  on:click|stopPropagation={() => handleItemClick(currentNode)}>
   <div id="firstDiv">
     <p class="hiddenChildrenArrow">
       <strong>
         {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
+        Render Time: {currentNode.renderTime}ms
       </strong>
       {name}
+      <span class="renderTime">{Math.floor(currentNode.renderTime)}ms</span>
     </p>
-    <button class="showHideState" on:click|stopPropagation={()=>{isStateShowing = !isStateShowing}}>Show State</button>
+    <button
+      class="showHideState"
+      hidden={typeof stateData === 'undefined'}
+      on:click|stopPropagation={() => {
+        isStateShowing = !isStateShowing
+      }}>
+      State
+    </button>
   </div>
   <!-- <CollapsibleSection headerText={'State'} >
     Here is state for this component.
   </CollapsibleSection> -->
   <div class="hiddenState" hidden={!isStateShowing}>
-    <p>Hidden State Information</p>
-    <p>Hidden State Information</p>
-    <p>Hidden State Information</p>
+    {JSON.stringify(stateData)}
   </div>
 </div>
-
