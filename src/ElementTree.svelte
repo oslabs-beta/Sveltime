@@ -27,6 +27,7 @@
   <div class="elementTree">
     {#each arr as item, i}
       <Element
+        stateData={item[3]}
         name={item[1]}
         key={i}
         currentNode={item[4]}
