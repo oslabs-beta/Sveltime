@@ -4,11 +4,10 @@
   "name": "Sveltime",
   "version": "1.0",
 
-  "description": "Developer Tools for Svelte",
-  "author": "Team Sveltetime",
+  "description": "Developer Tool to analyze Svelte apps and list component trees, state, and render timing",
+  "author": "Team Sveltime",
 
   "devtools_page": "extension/html/devtools.html",
-  "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -19,6 +18,5 @@
 
   "background": {
     "service_worker": "background.js"
-  },
-  "permissions": ["activeTab", "tabs", "scripting"]
+  }
 }
