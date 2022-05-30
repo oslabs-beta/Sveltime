@@ -98,12 +98,9 @@
   on:click|stopPropagation={() => handleItemClick(currentNode)}>
   <div id="firstDiv">
     <p class="hiddenChildrenArrow">
-      <strong>
-        {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
-        Render Time: {currentNode.renderTime}ms
-      </strong>
+      {!currentNode.children.length ? '' : currentNode.hasHiddenChildren ? '►' : '▼'}
       {name}
-      <span class="renderTime">{Math.floor(currentNode.renderTime)}ms</span>
+      <span class="renderTime">{currentNode.renderTime}ms</span>
     </p>
     <button
       class="showHideState"

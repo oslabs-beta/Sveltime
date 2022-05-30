@@ -18,11 +18,11 @@ chrome.runtime.onConnect.addListener(port => {
     port.onMessage.addListener((msg) => {
       let arrSvelteFiles;
       if (msg.name === 'start') {
-        console.log('msg received in devtools.js from App.svelete', msg);
+        //console.log('msg received in devtools.js from App.svelete', msg);
         chrome.devtools.inspectedWindow.getResources((resources) => {
           // console.log('resources: ', resources);
           arrSvelteFiles = resources.filter((file) => !!file.url.match(/.svelte$/));
-          console.log('svelte files array: ', arrSvelteFiles);
+          //console.log('svelte files array: ', arrSvelteFiles);
           const newArr = [];
           function recursiveCreateNewArr(arrSvelteFiles, index = 0) {
             if (arrSvelteFiles[index] === undefined) {
@@ -39,7 +39,7 @@ chrome.runtime.onConnect.addListener(port => {
             });
           }
           recursiveCreateNewArr(arrSvelteFiles);
-          console.log('newArr: ', newArr);
+          //console.log('newArr: ', newArr);
         });
       }
     });

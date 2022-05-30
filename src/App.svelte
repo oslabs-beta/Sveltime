@@ -95,17 +95,17 @@
             headNodes,
             getNode,
           )
-          console.log('headNodes: ', headNodes)
+          //console.log('headNodes: ', headNodes)
           currentComponents = headNodes
         }
          
-            console.log(
-              'message received in App.svelte from background.js: ',
-              portBackgroundMsg,
-            )
+            // console.log(
+            //   'message received in App.svelte from background.js: ',
+            //   portBackgroundMsg,
+            // )
             renderedComponentsArr = portBackgroundMsg.componentTimeArr
             arrayOfState = portBackgroundMsg.componentDetailsList
-            console.log('arrayOfState received: ', arrayOfState);
+            //console.log('arrayOfState received: ', arrayOfState);
             getRenderedNode = getRenderedComponentNode();
             renderedComponentsArr.forEach((component, index) => {
               // renderedComponents = new ComponentNode(component);
@@ -141,7 +141,7 @@
                 })
               }
             })
-            console.log('renderedComponents: ', renderedComponents)
+            //console.log('renderedComponents: ', renderedComponents)
 
             // console.log('currentComponents: ', )
             if (currentComponents[0]) {
@@ -157,7 +157,7 @@
 
   onMount(() => {
     document.addEventListener('messagesReceived', (e) => {
-    console.log('messages Received event listener: ', e.detail);
+    //console.log('messages Received event listener: ', e.detail);
     buildComponentObjects(e.detail.portMsg, e.detail.portBackgroundMsg);
   })
     
@@ -417,7 +417,7 @@
   }
 
   function handleItemClick(node) {
-    console.log('item click: ', node)
+    //console.log('item click: ', node)
     let initialVisibility = true
     if (node.children.length) {
       initialVisibility = node.children[0].visibility

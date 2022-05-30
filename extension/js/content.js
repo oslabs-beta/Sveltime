@@ -1,6 +1,6 @@
 const code = `
 (function() {
-console.log('This is the content script');
+//console.log('This is the content script');
 let componentArr = [];
 let componentFragmentArr = [];
 let componentTimeArr = [];
@@ -35,26 +35,26 @@ function deleteTimeComponent(arrComponent, arrTimeComponent, event) {
   
   arrTimeComponent.splice(arrTimeComponent.length - 1);
   arrComponent.splice(arrComponent.length - 1);
-  console.log('arrTimeComponent after delete: ', arrTimeComponent);
-  console.log('arrComponent after delete: ', arrComponent);
+  //console.log('arrTimeComponent after delete: ', arrTimeComponent);
+  //console.log('arrComponent after delete: ', arrComponent);
   componentDetailsList.splice(index, 1);
 
 
 }
 function deleteComponent(arr, map, event) {
   let index = 0;
-  console.log('map.get(event): ', map.get(event));
+  //console.log('map.get(event): ', map.get(event));
   for (let i = map.get(event); i < arr.length - 1; i++) {
     arr[i] = arr[i + 1];
   }
-  console.log('map: ', map);
+  //console.log('map: ', map);
   map.delete(event);
   return arr.splice(arr.length - 1);
 }
 
 let start;
 window.document.addEventListener('SvelteRegisterComponent', (e) => {
-  console.log('svelteRegisterComponent e:', e);
+  //console.log('svelteRegisterComponent e:', e);
   start = window.performance.now();
   
   componentObj1[e.detail.tagName + parseFloat(e.timeStamp.toFixed(10))] = e;
@@ -71,24 +71,24 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
   e.detail.component.$$.on_mount.push(() => {
    e.detail.component.customRenderTime = window.performance.now() - start;
 
-    console.log(e.detail.tagName, ' just mounted');
-    console.log('customRenderTime: ', e.detail.component.customRenderTime);
+    //console.log(e.detail.tagName, ' just mounted');
+    //console.log('customRenderTime: ', e.detail.component.customRenderTime);
     if (!firstRender) {
       mountedComponents++;
       if (mountedComponents === addedComponents && addComponentArr.length > 0) {
-        console.log('addComponentArr: ', addComponentArr);
+        //console.log('addComponentArr: ', addComponentArr);
         for (let i = componentArr.length - 1; i >= 0; i--) {
           if (componentArr[i] === addComponentArr[addComponentArr.length - 1]) {
             for (let k = componentArr.length - 1; k > i; k--) {
-              console.log('i  k: ', i, k);
+              //console.log('i  k: ', i, k);
               componentDetailsList[k + addComponentDetailsList.length] = componentDetailsList[k]
               componentArr[k + addComponentArr.length] = componentArr[k];
               componentTimeArr[k + addComponentArr.length] = componentTimeArr[k].slice();
               componentMap.set(componentMap2.get(k), k + addComponentArr.length);
-              console.log('componentArr after first push: ', componentArr);
+              //console.log('componentArr after first push: ', componentArr);
             }
             const len = componentMap.size;
-            console.log('componentMap2: ', componentMap2);
+            //console.log('componentMap2: ', componentMap2);
             for (let j = 0; j < addComponentArr.length; j++) {
               componentDetailsList[i + 1] = addComponentDetailsList[j]
               componentArr[i + 1] = addComponentArr[j];
@@ -99,9 +99,9 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
             break;
           }
         }
-        console.log('componentMap on add: ', componentMap);
-        console.log(componentArr);
-        console.log('componentTimeArr: ', componentTimeArr);
+        //console.log('componentMap on add: ', componentMap);
+        //console.log(componentArr);
+        //console.log('componentTimeArr: ', componentTimeArr);
        
         // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
 
@@ -124,10 +124,10 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     
   });
   e.detail.component.$$.on_destroy.push(() => {
-    console.log('e.detail.component.$$.on_destroy: ', e.detail.tagName, ' was destroyed!');
+    //console.log('e.detail.component.$$.on_destroy: ', e.detail.tagName, ' was destroyed!');
     // deleteComponent(componentArr, componentMap, e);
     deleteTimeComponent(componentArr, componentTimeArr, e);
-    console.log('componentArr on destroy: ', componentArr);
+    //console.log('componentArr on destroy: ', componentArr);
     
     // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
 
@@ -149,11 +149,11 @@ window.document.addEventListener('SvelteRegisterComponent', (e) => {
     componentArr.push(e.detail.tagName);
     componentDetailsList.push({'name': e.detail.tagName, 'details': e.detail.component.$capture_state()});
   }
-  console.log('e.detail.tagName: ',e.detail.tagName,  'e.detail.id: ',e.detail.id);
+  //console.log('e.detail.tagName: ',e.detail.tagName,  'e.detail.id: ',e.detail.id);
 
   if (e.detail.id === 'create_fragment' && firstRender){
     // console.log('componentMap2: ', componentMap2);
-    console.log('componentArr on original render: ', componentArr);
+    //console.log('componentArr on original render: ', componentArr);
     // window.postMessage(JSON.stringify({'componentTimeArr': componentTimeArr, 'componentDetailsList': componentDetailsList}));
 
     for (const [key, value] of Object.entries(componentObj1)) {
@@ -204,9 +204,9 @@ function resetComponentDetailsList(parsedData) {
 window.addEventListener("message", function(event) {
   let parsedData = JSON.parse(event.data);
   parsedData = resetComponentDetailsList(parsedData);
-  console.log('parsedData before rebase: ', parsedData);
+  //console.log('parsedData before rebase: ', parsedData);
   parsedData.componentTimeArr = rebaseRenderTime(parsedData.componentTimeArr);
-  console.log('parsedData: ', parsedData);
+  //console.log('parsedData: ', parsedData);
   chrome.runtime.sendMessage(parsedData);
 });
 
