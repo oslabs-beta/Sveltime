@@ -7,6 +7,13 @@
   "description": "Developer Tool to analyze Svelte apps and list component trees, state, and render timing",
   "author": "Team Sveltime",
 
+  "icons": {
+    "16": "/src/assets/clock16.png",
+    "32": "/src/assets/clock32.png",
+    "48": "/src/assets/clock48.png",
+    "128": "/src/assets/clock128.png"
+  },
+
   "devtools_page": "extension/html/devtools.html",
   "content_scripts": [
     {
