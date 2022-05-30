@@ -1,4 +1,4 @@
-console.log('this is the background script');
+// console.log('this is the background script');
 
 // chrome.runtime.onMessage.addListener((msg, sender, response)=> {
 //   if (msg) {
@@ -19,7 +19,7 @@ let portBackground;
 
 chrome.runtime.onMessage.addListener((msg, sender, response) => {
   if (msg) {
-    console.log('msg received in background.js', msg);
+    // console.log('msg received in background.js', msg);
     messageFromContentScript = msg;
     if (!first) {
       portBackground.postMessage(messageFromContentScript);
@@ -30,10 +30,10 @@ chrome.runtime.onMessage.addListener((msg, sender, response) => {
         if (port.name === 'svelte-background-connection') {
           portBackground = port;
           port.onMessage.addListener((message) => {
-            console.log('msg received in background.js from App.svelte : ', message);
+            // console.log('msg received in background.js from App.svelte : ', message);
             
           });
-        console.log('background.js msg before posting to App.svelte', messageFromContentScript);
+        // console.log('background.js msg before posting to App.svelte', messageFromContentScript);
         port.postMessage(messageFromContentScript);
         messageFromContentScript = '';
         first = false;  
