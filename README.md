@@ -6,7 +6,6 @@
 
 Download from the Chrome Extension Store
 
-Download the repo from GitHub
 
 **About Sveltime**
 
