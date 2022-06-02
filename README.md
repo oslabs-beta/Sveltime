@@ -4,7 +4,7 @@
 
 
 
-Download from the Chrome Extension Store
+[Download from the Chrome Extension Store](https://chrome.google.com/webstore/detail/sveltime/ohihipnjpfmcgkdfgaibblakcaebhjhk?hl=en)
 
 
 **About Sveltime**
@@ -56,12 +56,11 @@ Using our Chrome Dev Tool extension, Svelte developers can see their components 
 <a href="https://www.linkedin.com/in/sunitb/">Sunit's LinkedIn</a>
 
 
- 
 
 <img src="./readme_images/william.jpg" style="width:10%;height:auto;"/><br/>
 ### William Reiff <br/>
 <a href="https://github.com/wrreiff">William's GitHub</a><br/>
-<a>William's LinkedIn</a>
+<a href="https://www.linkedin.com/in/williamreiff">William's LinkedIn</a>
 
 
 
@@ -80,7 +79,6 @@ Using our Chrome Dev Tool extension, Svelte developers can see their components 
 
 
 **Areas for Future Development**
-
 
 
 * Time Jump/Snapshot on changes in state
