@@ -16,7 +16,7 @@ Things we have planned but not yet implemented:
 
 * Time-jump/Snapshot: This will be the ability to store changes of state within a specific render as a snapshot and to jump between snapshots and visualize their differences.
 
-* FlowChart: Use d3 to view components in differnt forms and manipulate the data.
+* FlowChart: Use d3 to view components in different forms and manipulate the data.
 
 * Stores: Currently we only visualize Svelte components. If you can integrate visualization of Svelte stores, that would be terrific!
 
