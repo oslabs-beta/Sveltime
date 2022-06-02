@@ -10,7 +10,7 @@ Download from the Chrome Extension Store
 **About Sveltime**
 
 
-Other frameworks have long had a variety of tools available for development and debugging. Svelte developers have not. Using our Chrome Dev Tool extension, Svelte developers can see their components hierarchically, with render times and state available at the component level.
+Using our Chrome Dev Tool extension, Svelte developers can see their components hierarchically, with render times and state available at the component level.
 
 **Features**
 
@@ -73,7 +73,7 @@ Other frameworks have long had a variety of tools available for development and 
 
 
 <img src="./readme_images/peter.png" style="width:10%;height:auto;"/><br/>
-## Peter Steinberg <br/>
+### Peter Steinberg <br/>
 <a href="https://github.com/bklynpeter">Peter's GitHub</a><br/>
 <a href="https://www.linkedin.com/in/bklynpeter/">Peter's LinkedIn</a>
 
@@ -90,10 +90,10 @@ Other frameworks have long had a variety of tools available for development and 
 
 **How to Contribute**
 
-Link to Contribute document
+[Click here if you are interested in contributing.](https://github.com/oslabs-beta/Sveltime/blob/main/Contribute.md)
 
 **License**
 
-M.I.T.
+[MIT License](https://github.com/oslabs-beta/Sveltime/blob/main/LICENSE)
 
 **Sveltime is available now on the Chrome Store and on GitHub**

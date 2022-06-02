@@ -69,10 +69,23 @@
     background-color: transparent;
     text-shadow: 0 0 10px 5px rgba(0, 0, 0, 0.701);
   }
+  .sveltimeLogo {
+    /* width: 60px; */
+    height: 50px;
+    margin-left: 20px;
+  }
+  .leftBox {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
 </style>
 
 <div class="navbar" id="navbar">
-  <h1 class="logoTitle">SVELTIME</h1>
+  <div class="leftBox">
+  <img src="../src/assets/full_logo_cropped.png" class="sveltimeLogo" alt="Sveltime Logo"/>
+  <!-- <h1 class="logoTitle">SVELTIME</h1> -->
+</div>
   <div class="buttonBox">
     <!-- turn this on if turning on App.svelte if condition to render and show stores.
       <button
